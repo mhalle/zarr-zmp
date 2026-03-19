@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import json
-import math
 import os
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Self
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-import rfc8785
 from zarr.abc.store import (
     ByteRequest,
     OffsetByteRequest,
@@ -19,8 +14,8 @@ from zarr.abc.store import (
 )
 from zarr.core.buffer import Buffer, BufferPrototype
 
-from zmanifest._types import Addressing, compute_addressing
-from zmanifest.builder import _canonical_hash, _git_blob_hash
+from zmanifest._types import Addressing
+from zmanifest.builder import Builder, git_blob_hash
 from zmanifest.manifest import Manifest, ManifestEntry
 from zmanifest.resolve import fetch_uri, is_relative_uri, resolve_entry, resolve_uri
 from zmanifest.resolver import BlobResolver, GitResolver, TemplateResolver
@@ -49,32 +44,10 @@ def _apply_byte_range(data: bytes, byte_range: ByteRequest | None) -> bytes:
     return data
 
 
-def _canonical_bytes(raw: bytes) -> bytes:
-    """If raw is JSON, return RFC 8785 canonical form. Otherwise return as-is."""
-    try:
-        obj = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return raw
-    return rfc8785.dumps(obj)
-
-
 def _is_zarr_metadata(path: str) -> bool:
     """Check if a path is a zarr metadata file."""
     basename = path.rsplit("/", 1)[-1] if "/" in path else path
     return basename in ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
-
-
-def _parse_array_path_and_chunk_key(
-    path: str,
-) -> tuple[str | None, str | None]:
-    parts = path.split("/")
-    try:
-        c_idx = parts.index("c")
-        array_path = "/".join(parts[:c_idx]) or None
-        chunk_key = "/".join(parts[c_idx + 1 :]) or None
-        return array_path, chunk_key
-    except ValueError:
-        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -256,113 +229,33 @@ class ZMPWritableStore(Store):
         if external:
             self._chunk_dir.mkdir(parents=True, exist_ok=True)
 
-        paths: list[str] = []
-        sizes: list[int] = []
-        retrieval_keys: list[str] = []
-        texts: list[str | None] = []
-        data_blobs: list[bytes | None] = []
-        array_paths: list[str | None] = []
-        chunk_keys: list[str | None] = []
-        addressing_lists: list[list[str]] = []
+        builder = Builder(
+            zarr_format=self._zarr_format,
+            data_compression=self._data_compression,
+            data_compression_level=self._data_compression_level,
+            max_rows_per_group=self._max_rows_per_group,
+            metadata=self._metadata,
+        )
 
         for path in sorted(self._entries):
             raw = self._entries[path]
             is_meta = _is_zarr_metadata(path)
 
             if is_meta:
-                canonical = _canonical_bytes(raw)
-                retrieval_key = _git_blob_hash(canonical)
-                text = raw.decode("utf-8")
-                data = None
+                # Zarr metadata: inline as text, Builder handles hashing
+                builder.add(path, text=raw.decode("utf-8"))
+            elif external:
+                # External mode: write blob to chunk_dir, store retrieval_key only
+                rk = git_blob_hash(raw)
+                blob_path = self._chunk_dir / rk
+                if not blob_path.exists():
+                    blob_path.write_bytes(raw)
+                builder.add(path, retrieval_key=rk, size=len(raw))
             else:
-                retrieval_key = _git_blob_hash(raw)
-                text = None
-                if external:
-                    blob_path = self._chunk_dir / retrieval_key
-                    if not blob_path.exists():
-                        blob_path.write_bytes(raw)
-                    data = None
-                else:
-                    data = raw
+                # Embedded mode: inline binary data
+                builder.add(path, data=raw)
 
-            array_path, chunk_key = _parse_array_path_and_chunk_key(path)
-
-            flags = compute_addressing(
-                text=text, data=data, retrieval_key=retrieval_key,
-            )
-
-            paths.append(path)
-            sizes.append(len(raw))
-            retrieval_keys.append(retrieval_key)
-            texts.append(text)
-            data_blobs.append(data)
-            array_paths.append(array_path)
-            chunk_keys.append(chunk_key)
-            addressing_lists.append(flags)
-
-        table = pa.table(
-            {
-                "path": pa.array(paths, type=pa.string()),
-                "size": pa.array(sizes, type=pa.int64()),
-                "retrieval_key": pa.array(retrieval_keys, type=pa.string()),
-                "text": pa.array(texts, type=pa.string()),
-                "data": pa.array(data_blobs, type=pa.binary()),
-                "array_path": pa.array(array_paths, type=pa.string()),
-                "chunk_key": pa.array(chunk_keys, type=pa.string()),
-                "addressing": pa.array(addressing_lists, type=pa.list_(pa.string())),
-            }
-        )
-
-        # File-level metadata
-        file_meta: dict[bytes, bytes] = {
-            b"zmp_version": json.dumps("0.1.0").encode(),
-            b"zarr_format": json.dumps(self._zarr_format).encode(),
-            b"retrieval_scheme": json.dumps("git-sha1").encode(),
-        }
-        for k, v in self._metadata.items():
-            file_meta[k.encode()] = v.encode() if isinstance(v, str) else json.dumps(v).encode()
-
-        schema = table.schema.with_metadata(file_meta)
-        table = table.cast(schema)
-
-        # Compression: data uncompressed, rest zstd
-        compression = {col: "zstd" for col in table.schema.names}
-        compression["data"] = self._data_compression
-        use_dictionary = {col: True for col in table.schema.names}
-        use_dictionary["data"] = False
-
-        # Row group sizing
-        if self._max_rows_per_group is not None:
-            max_rg = self._max_rows_per_group
-        else:
-            has_inline_data = any(v is not None for v in data_blobs)
-            if has_inline_data:
-                max_rg = 2
-            else:
-                max_rg = max(1, math.ceil(len(table) / 16))
-
-        compression_level = None
-        if self._data_compression_level is not None:
-            compression_level = {"data": self._data_compression_level}
-
-        writer = pq.ParquetWriter(
-            str(self._output),
-            schema,
-            compression=compression,
-            compression_level=compression_level,
-            use_dictionary=use_dictionary,
-        )
-        try:
-            n = len(table)
-            i = 0
-            while i < n:
-                end = min(i + max_rg, n)
-                writer.write_table(table.slice(i, end - i))
-                i = end
-        finally:
-            writer.close()
-
-        return self._output
+        return builder.write(self._output)
 
 
 # ---------------------------------------------------------------------------

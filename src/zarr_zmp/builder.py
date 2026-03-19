@@ -14,7 +14,7 @@ from zarr.abc.store import Store
 from zarr.core.buffer import default_buffer_prototype
 
 from zmanifest._types import compute_addressing
-from zmanifest.builder import _canonical_hash, _git_blob_hash, _parse_array_path_and_chunk_key
+from zmanifest.builder import git_blob_hash, _parse_array_path_and_chunk_key
 
 
 async def _read_store(store: Store) -> dict[str, bytes]:
@@ -132,7 +132,7 @@ def _build_zmp_from_entries(
         raw = entries[path]
         text, binary = _classify_entry(path, raw)
         array_path, chunk_key = _parse_array_path_and_chunk_key(path)
-        rk = _git_blob_hash(raw)
+        rk = git_blob_hash(raw)
 
         paths.append(path)
         sizes.append(len(raw))

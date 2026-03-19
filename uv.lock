@@ -485,7 +485,7 @@ provides-extras = ["git", "http", "test"]
 [[package]]
 name = "zmanifest"
 version = "0.1.0"
-source = { git = "https://github.com/mhalle/zmanifest.git#b46d4556acf5837376a7040d97a25a72a2a04266" }
+source = { git = "https://github.com/mhalle/zmanifest.git#33a055b5dd5d8dd17f510bf2c12d685135ef2295" }
 dependencies = [
     { name = "pyarrow" },
     { name = "rfc8785" },
