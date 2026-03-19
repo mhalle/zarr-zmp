@@ -476,16 +476,16 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'" },
     { name = "vost", marker = "extra == 'test'", specifier = ">=0.78.1" },
     { name = "zarr", specifier = ">=3.0" },
-    { name = "zmanifest", editable = "../zmp" },
-    { name = "zmanifest", extras = ["git"], marker = "extra == 'git'", editable = "../zmp" },
-    { name = "zmanifest", extras = ["http"], marker = "extra == 'http'", editable = "../zmp" },
+    { name = "zmanifest", editable = "../zmanifest" },
+    { name = "zmanifest", extras = ["git"], marker = "extra == 'git'", editable = "../zmanifest" },
+    { name = "zmanifest", extras = ["http"], marker = "extra == 'http'", editable = "../zmanifest" },
 ]
 provides-extras = ["git", "http", "test"]
 
 [[package]]
 name = "zmanifest"
 version = "0.1.0"
-source = { editable = "../zmp" }
+source = { editable = "../zmanifest" }
 dependencies = [
     { name = "pyarrow" },
     { name = "rfc8785" },
