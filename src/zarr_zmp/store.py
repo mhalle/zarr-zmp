@@ -19,11 +19,11 @@ from zarr.abc.store import (
 )
 from zarr.core.buffer import Buffer, BufferPrototype
 
-from zmp._types import Addressing, compute_addressing
-from zmp.builder import _canonical_hash, _git_blob_hash
-from zmp.manifest import Manifest, ManifestEntry
-from zmp.resolve import fetch_uri, is_relative_uri, resolve_entry, resolve_uri
-from zmp.resolver import BlobResolver, GitResolver, TemplateResolver
+from zmanifest._types import Addressing, compute_addressing
+from zmanifest.builder import _canonical_hash, _git_blob_hash
+from zmanifest.manifest import Manifest, ManifestEntry
+from zmanifest.resolve import fetch_uri, is_relative_uri, resolve_entry, resolve_uri
+from zmanifest.resolver import BlobResolver, GitResolver, TemplateResolver
 
 # Type alias for mount opener callbacks (zarr Store-typed version)
 ZarrMountOpener = Callable[[ManifestEntry], Store]
@@ -498,7 +498,7 @@ class ZMPStore(Store):
         mount_opener: ZarrMountOpener | None = None,
         base_uri: str | None = None,
     ) -> ZMPStore:
-        from zmp.resolve import base_uri_from_source
+        from zmanifest.resolve import base_uri_from_source
 
         manifest = Manifest(path)
         if base_uri is None:
@@ -556,7 +556,7 @@ class ZMPStore(Store):
             base_uri: Base URI for resolving relative external_uri values.
                 Overrides file-level metadata and manifest URL derivation.
         """
-        from zmp.resolve import base_uri_from_source
+        from zmanifest.resolve import base_uri_from_source
 
         # Fetch manifest if remote
         if manifest_url.startswith("http://") or manifest_url.startswith("https://"):

@@ -8,14 +8,17 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "zmp>=0.1.0",
+    "zmanifest>=0.1.0",
     "zarr>=3.0",
 ]
 
 [project.optional-dependencies]
-git = ["zmp[git]"]
-http = ["zmp[http]"]
+git = ["zmanifest[git]"]
+http = ["zmanifest[http]"]
 test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
+
+[tool.uv.sources]
+zmanifest = { path = "../zmp", editable = true }
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]

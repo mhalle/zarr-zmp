@@ -13,8 +13,8 @@ import pyarrow.parquet as pq
 from zarr.abc.store import Store
 from zarr.core.buffer import default_buffer_prototype
 
-from zmp._types import compute_addressing
-from zmp.builder import _canonical_hash, _git_blob_hash, _parse_array_path_and_chunk_key
+from zmanifest._types import compute_addressing
+from zmanifest.builder import _canonical_hash, _git_blob_hash, _parse_array_path_and_chunk_key
 
 
 async def _read_store(store: Store) -> dict[str, bytes]:

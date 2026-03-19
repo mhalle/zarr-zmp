@@ -1,4 +1,4 @@
-from zmp import (
+from zmanifest import (
     Addressing,
     BlobResolver,
     Builder,
