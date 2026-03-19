@@ -18,7 +18,7 @@ http = ["zmanifest[http]"]
 test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
 
 [tool.uv.sources]
-zmanifest = { path = "../zmanifest", editable = true }
+zmanifest = { git = "https://github.com/mhalle/zmanifest.git" }
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
