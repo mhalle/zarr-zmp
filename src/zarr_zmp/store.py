@@ -386,11 +386,11 @@ def default_zmp_mount_opener(
         entry: The manifest entry for the mount point.
         resolver: BlobResolver to pass to child .zmp stores.
         mount_opener: MountOpener to pass to child .zmp stores.
-        base_uri: Base URI for resolving relative external_uri values.
+        base_uri: Base URI for resolving relative uri values.
     """
-    uri = entry.external_uri
+    uri = entry.uri
     if uri is None:
-        raise ValueError(f"Mount entry {entry.path!r} has no external_uri")
+        raise ValueError(f"Mount entry {entry.path!r} has no uri")
 
     # Resolve relative URIs against the parent's base
     uri = resolve_uri(uri, base_uri)
@@ -535,7 +535,7 @@ class ZMPStore(Store):
         If ``resolver`` is provided directly, it takes precedence over
         ``blobs`` (the ``blobs`` argument is ignored).
 
-        Relative ``external_uri`` values in the manifest are resolved
+        Relative ``uri`` values in the manifest are resolved
         against ``base_uri``. If not provided, ``base_uri`` falls back
         to the ``base_uri`` file-level metadata key, then to the parent
         directory of ``manifest_url``.
@@ -553,7 +553,7 @@ class ZMPStore(Store):
             blobs: URL template, git repo path, or base path for blob resolution.
             resolver: Pre-built BlobResolver instance (overrides ``blobs``).
             mount_opener: Custom callable to open child stores for mount entries.
-            base_uri: Base URI for resolving relative external_uri values.
+            base_uri: Base URI for resolving relative uri values.
                 Overrides file-level metadata and manifest URL derivation.
         """
         from zmanifest.resolve import base_uri_from_source
