@@ -15,7 +15,7 @@ from zarr.abc.store import (
 from zarr.core.buffer import Buffer, BufferPrototype
 
 from zmanifest._types import Addressing
-from zmanifest.builder import Builder, git_blob_hash
+from zmanifest.builder import Builder, canonical_json, git_blob_hash
 from zmanifest.manifest import Manifest, ManifestEntry
 from zmanifest.resolve import fetch_uri, is_relative_uri, resolve_entry, resolve_uri
 from zmanifest.resolver import BlobResolver, GitResolver, TemplateResolver
@@ -242,8 +242,9 @@ class ZMPWritableStore(Store):
             is_meta = _is_zarr_metadata(path)
 
             if is_meta:
-                # Zarr metadata: inline as text, Builder handles hashing
-                builder.add(path, text=raw.decode("utf-8"))
+                # Zarr metadata: canonicalize JSON, then add as text
+                text = canonical_json(raw.decode("utf-8"))
+                builder.add(path, text=text)
             elif external:
                 # External mode: write blob to chunk_dir, store retrieval_key only
                 rk = git_blob_hash(raw)
