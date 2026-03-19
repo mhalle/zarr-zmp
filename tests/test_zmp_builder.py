@@ -86,18 +86,17 @@ class TestBuilder:
         assert entry.text is None
         assert manifest.get_data("arr/c/0") is None
 
-    def test_retrieval_keys_canonical(self, tmp_path: Path) -> None:
-        """Text hashes use canonical JSON (RFC 8785)."""
+    def test_retrieval_keys_raw_text(self, tmp_path: Path) -> None:
+        """Builder hashes raw text bytes (no implicit canonicalization)."""
         import hashlib
-        import rfc8785
 
         text = '{"b": 1, "a": 2}'
         builder = Builder()
         rk = builder.add("zarr.json", text=text)
 
-        canonical = rfc8785.dumps(json.loads(text))
-        header = f"blob {len(canonical)}\0".encode()
-        expected = hashlib.sha1(header + canonical).hexdigest()
+        raw = text.encode("utf-8")
+        header = f"blob {len(raw)}\0".encode()
+        expected = hashlib.sha1(header + raw).hexdigest()
 
         assert rk == expected
 
