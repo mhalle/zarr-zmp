@@ -1,0 +1,22 @@
+[project]
+name = "zarr-zmp"
+version = "0.1.0"
+description = "Zarr v3 store adapter for ZMP (Manifest Parquet) files"
+readme = "README.md"
+authors = [
+    { name = "MH", email = "mhalle@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "zmp>=0.1.0",
+    "zarr>=3.0",
+]
+
+[project.optional-dependencies]
+git = ["zmp[git]"]
+http = ["zmp[http]"]
+test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
