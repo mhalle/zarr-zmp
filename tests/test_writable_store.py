@@ -112,7 +112,7 @@ class TestEmbeddedWrite:
         raw_json = entry.text.encode("utf-8")
         canonical = rfc8785.dumps(json.loads(raw_json))
         expected_hash = git_blob_hash(canonical)
-        assert entry.retrieval_key == expected_hash
+        assert entry.checksum == expected_hash
 
     def test_retrieval_keys_present(self, tmp_path: Path) -> None:
         zmp_path = tmp_path / "out.zmp"
@@ -126,8 +126,8 @@ class TestEmbeddedWrite:
                 continue  # root/index row has no retrieval key
             entry = manifest.get_entry(path)
             assert entry is not None
-            assert entry.retrieval_key is not None
-            assert len(entry.retrieval_key) == 40  # SHA-1 hex
+            assert entry.checksum is not None
+            assert len(entry.checksum) == 40  # SHA-1 hex
 
 
 class TestExternalWrite:
@@ -158,7 +158,7 @@ class TestExternalWrite:
         entry = manifest.get_entry("arr/c/0")
         assert entry is not None
         assert manifest.get_data("arr/c/0") is None
-        assert entry.retrieval_key is not None
+        assert entry.checksum is not None
 
     def test_metadata_still_inlined(self, tmp_path: Path) -> None:
         """Even in external mode, metadata is inlined as text."""
@@ -173,16 +173,42 @@ class TestExternalWrite:
         assert entry.text is not None
 
     def test_roundtrip_via_resolver(self, tmp_path: Path) -> None:
-        """Write external, read back via TemplateResolver."""
+        """Write external, read back via HttpResolver (local files)."""
         zmp_path = tmp_path / "out.zmp"
         chunk_dir = tmp_path / "chunks"
-        with ZMPWritableStore.create(zmp_path, chunk_dir=chunk_dir) as store:
+        with ZMPWritableStore.create(
+            zmp_path,
+            chunk_dir=chunk_dir,
+            base_resolve={"git": {"repo": str(chunk_dir)}},
+        ) as store:
             root = zarr.open_group(store=store, mode="w")
             root.create_array("arr", data=np.arange(8.0), chunks=(2,))
 
-        store = ZMPStore.from_url(str(zmp_path), blobs=f"{chunk_dir}/{{hash}}")
+        # External chunks are stored as files named by hash.
+        # Use HttpResolver which handles local files.
+        from zarr_zmp import HttpResolver
+        store = ZMPStore.from_url(
+            str(zmp_path),
+            resolvers={"git": _ChunkDirResolver(str(chunk_dir))},
+        )
         group = zarr.open_group(store=store, mode="r")
         np.testing.assert_array_equal(group["arr"][:], np.arange(8.0))
+
+
+class _ChunkDirResolver:
+    """Test resolver that reads chunks from a flat directory by oid."""
+
+    def __init__(self, chunk_dir: str) -> None:
+        self._dir = Path(chunk_dir)
+
+    async def resolve(self, params: dict, bases: list[dict] | None = None) -> bytes | None:
+        oid = params.get("oid")
+        if oid is None:
+            return None
+        path = self._dir / oid
+        if path.exists():
+            return path.read_bytes()
+        return None
 
     def test_dedup(self, tmp_path: Path) -> None:
         """Identical chunks are only written once to chunk_dir."""

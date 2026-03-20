@@ -46,14 +46,13 @@ class TestBuilder:
         np.testing.assert_array_equal(group["arr"][:], [1.0, 2.0, 3.0, 4.0])
 
     def test_virtual_refs(self, tmp_path: Path) -> None:
-        """Virtual entries have external_uri, offset, length."""
+        """Virtual entries have resolve dict with http scheme."""
         builder = Builder()
         builder.add("zarr.json", text='{"zarr_format":3,"node_type":"group"}')
         builder.add(
             "arr/c/0",
-            uri="s3://bucket/file.nc",
-            offset=1024,
-            length=4096,
+            resolve={"http": {"url": "s3://bucket/file.nc", "offset": 1024, "length": 4096}},
+            size=4096,
         )
 
         zmp_path = builder.write(tmp_path / "out.zmp")
@@ -61,18 +60,20 @@ class TestBuilder:
 
         entry = manifest.get_entry("arr/c/0")
         assert entry is not None
-        assert entry.uri == "s3://bucket/file.nc"
-        assert entry.offset == 1024
-        assert entry.length == 4096
+        resolve = json.loads(entry.resolve)
+        assert resolve["http"]["url"] == "s3://bucket/file.nc"
+        assert resolve["http"]["offset"] == 1024
+        assert resolve["http"]["length"] == 4096
         assert entry.size == 4096
 
     def test_ref_entries(self, tmp_path: Path) -> None:
-        """Reference entries have retrieval_key but no inline data."""
+        """Reference entries have resolve/checksum but no inline data."""
         builder = Builder()
         builder.add("zarr.json", text='{"zarr_format":3,"node_type":"group"}')
         builder.add(
             "arr/c/0",
-            retrieval_key="abcdef1234567890abcdef1234567890abcdef12",
+            resolve={"git": {"oid": "abcdef1234567890abcdef1234567890abcdef12"}},
+            checksum="abcdef1234567890abcdef1234567890abcdef12",
             size=32768,
         )
 
@@ -81,7 +82,7 @@ class TestBuilder:
 
         entry = manifest.get_entry("arr/c/0")
         assert entry is not None
-        assert entry.retrieval_key == "abcdef1234567890abcdef1234567890abcdef12"
+        assert entry.checksum == "abcdef1234567890abcdef1234567890abcdef12"
         assert entry.size == 32768
         assert entry.text is None
         assert manifest.get_data("arr/c/0") is None
@@ -92,13 +93,17 @@ class TestBuilder:
 
         text = '{"b": 1, "a": 2}'
         builder = Builder()
-        rk = builder.add("zarr.json", text=text)
+        builder.add("zarr.json", text=text)
+        zmp_path = builder.write(tmp_path / "out.zmp")
+
+        manifest = Manifest(str(zmp_path))
+        entry = manifest.get_entry("zarr.json")
 
         raw = text.encode("utf-8")
         header = f"blob {len(raw)}\0".encode()
         expected = hashlib.sha1(header + raw).hexdigest()
 
-        assert rk == expected
+        assert entry.checksum == expected
 
     def test_data_hash_is_raw(self, tmp_path: Path) -> None:
         """Data hashes are git-sha1 of raw bytes (not canonicalized)."""
@@ -106,11 +111,15 @@ class TestBuilder:
 
         data = b"\x00\x01\x02\x03"
         builder = Builder()
-        rk = builder.add("c/0", data=data)
+        builder.add("c/0", data=data)
+        zmp_path = builder.write(tmp_path / "out.zmp")
+
+        manifest = Manifest(str(zmp_path))
+        entry = manifest.get_entry("c/0")
 
         header = f"blob {len(data)}\0".encode()
         expected = hashlib.sha1(header + data).hexdigest()
-        assert rk == expected
+        assert entry.checksum == expected
 
     def test_array_path_not_in_core_builder(self, tmp_path: Path) -> None:
         """Core Builder does not write array_path/chunk_key columns.
@@ -141,14 +150,13 @@ class TestBuilder:
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         builder = Builder(
             zarr_format="3",
-            retrieval_scheme="git-sha1",
             metadata={"description": "test", "doi": "10.1234/test"},
         )
         builder.add("zarr.json", text='{}')
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         manifest = Manifest(str(zmp_path))
-        assert manifest.metadata["zmp_version"] == "0.1.0"
+        assert manifest.metadata["zmp_version"] == "0.2.0"
         assert manifest.metadata["zarr_format"] == "3"
         assert manifest.metadata.get("extra", {}).get("description") == "test"
         assert manifest.metadata.get("extra", {}).get("doi") == "10.1234/test"
@@ -173,7 +181,7 @@ class TestBuilder:
 
         builder = Builder()
         for i in range(1000):
-            builder.add(f"c/{i}", retrieval_key="a" * 40, size=100)
+            builder.add(f"c/{i}", resolve={"git": {"oid": "a" * 40}}, checksum="a" * 40, size=100)
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         pf = pq.ParquetFile(str(zmp_path))
@@ -186,15 +194,15 @@ class TestBuilder:
         builder.add("native/c/0", data=b"\x00" * 16)
         builder.add(
             "virtual/c/0",
-            uri="https://example.com/data.bin",
-            offset=0,
-            length=1024,
+            resolve={"http": {"url": "https://example.com/data.bin", "offset": 0, "length": 1024}},
+            size=1024,
         )
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         manifest = Manifest(str(zmp_path))
         assert manifest.get_data("native/c/0") is not None
-        assert manifest.get_entry("virtual/c/0").uri == "https://example.com/data.bin"
+        resolve = json.loads(manifest.get_entry("virtual/c/0").resolve)
+        assert resolve["http"]["url"] == "https://example.com/data.bin"
 
     def test_root_metadata(self, tmp_path: Path) -> None:
         builder = Builder()
@@ -243,14 +251,14 @@ class TestBuilder:
         )
         builder.add(
             "vol/c/1",
-            uri="s3://bucket/file.dcm",
-            offset=1024,
-            length=4096,
+            resolve={"http": {"url": "s3://bucket/file.dcm", "offset": 1024, "length": 4096}},
+            size=4096,
             metadata={"SliceLocation": 45.0, "InstanceNumber": 2},
         )
         builder.add(
             "vol/c/2",
-            retrieval_key="a" * 40,
+            resolve={"git": {"oid": "a" * 40}},
+            checksum="a" * 40,
             size=4096,
             metadata={"SliceLocation": 47.5},
         )
@@ -277,8 +285,8 @@ class TestBuilder:
         builder = Builder()
         builder.add("a.json", text="hello")
         builder.add("b.bin", data=b"\x00" * 100)
-        builder.add("c.bin", uri="s3://x", offset=0, length=500)
-        builder.add("d.bin", retrieval_key="a" * 40, size=200)
+        builder.add("c.bin", resolve={"http": {"url": "s3://x", "offset": 0, "length": 500}}, size=500)
+        builder.add("d.bin", resolve={"git": {"oid": "a" * 40}}, checksum="a" * 40, size=200)
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         manifest = Manifest(str(zmp_path))
@@ -292,11 +300,11 @@ class TestBuilder:
         import pyarrow.parquet as pq
 
         builder = Builder()
-        builder.add("a", text="hello")                          # T, K
-        builder.add("b", data=b"\x00")                          # D, K
-        builder.add("c", uri="s3://x", offset=0, length=10)    # U
-        builder.add("d", retrieval_key="a" * 40, size=10)       # K
-        builder.add("e", data=b"\x01", uri="s3://y", offset=0, length=1)  # D, K, U
+        builder.add("a", text="hello")                          # T
+        builder.add("b", data=b"\x00")                          # D
+        builder.add("c", resolve={"http": {"url": "s3://x", "offset": 0, "length": 10}}, size=10)  # R
+        builder.add("d", resolve={"git": {"oid": "a" * 40}}, checksum="a" * 40, size=10)  # R
+        builder.add("e", data=b"\x01", resolve={"http": {"url": "s3://y", "offset": 0, "length": 1}})  # D, R
         zmp_path = builder.write(tmp_path / "out.zmp")
 
         pf = pq.ParquetFile(str(zmp_path))
@@ -305,8 +313,8 @@ class TestBuilder:
             table.column("path")[i].as_py(): table.column("addressing")[i].as_py()
             for i in range(len(table))
         }
-        assert set(addr["a"]) == {"T", "K"}
-        assert set(addr["b"]) == {"D", "K"}
-        assert set(addr["c"]) == {"U"}
-        assert set(addr["d"]) == {"K"}
-        assert set(addr["e"]) == {"D", "K", "U"}
+        assert set(addr["a"]) == {"T"}
+        assert set(addr["b"]) == {"D"}
+        assert set(addr["c"]) == {"R"}
+        assert set(addr["d"]) == {"R"}
+        assert set(addr["e"]) == {"D", "R"}

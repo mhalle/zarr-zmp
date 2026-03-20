@@ -60,24 +60,15 @@ class TestBuildZMP:
         assert data is not None
         assert len(data) > 0
 
-    def test_array_path_and_chunk_key(self, tmp_path: Path) -> None:
-        """array_path/chunk_key are written as parquet columns by build_zmp."""
-        import pyarrow.parquet as pq
-
+    def test_chunk_entries_present(self, tmp_path: Path) -> None:
+        """Chunk entries are written with correct paths."""
         src = MemoryStore()
         root = zarr.open_group(store=src, mode="w")
         root.create_array("myarr", data=np.arange(16.0).reshape(4, 4), chunks=(2, 2))
 
         zmp_path = build_zmp(src, tmp_path / "out.zmp")
-        pf = pq.ParquetFile(str(zmp_path))
-        table = pf.read(columns=["path", "array_path", "chunk_key"])
-        for i in range(len(table)):
-            if table.column("path")[i].as_py() == "myarr/c/0/1":
-                assert table.column("array_path")[i].as_py() == "myarr"
-                assert table.column("chunk_key")[i].as_py() == "0/1"
-                break
-        else:
-            pytest.fail("Entry not found in parquet")
+        manifest = Manifest(str(zmp_path))
+        assert manifest.has("myarr/c/0/1")
 
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         src = MemoryStore()
@@ -90,7 +81,7 @@ class TestBuildZMP:
             metadata={"description": "test dataset"},
         )
         manifest = Manifest(str(zmp_path))
-        assert manifest.metadata["zmp_version"] == "0.1.0"
+        assert manifest.metadata["zmp_version"] == "0.2.0"
         assert manifest.metadata["zarr_format"] == "3"
         assert manifest.metadata.get("extra", {}).get("description") == "test dataset"
 

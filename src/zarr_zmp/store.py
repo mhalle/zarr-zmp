@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import json
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Self
@@ -17,13 +17,16 @@ from zarr.core.buffer import Buffer, BufferPrototype
 from zmanifest._types import Addressing
 from zmanifest.builder import Builder, canonical_json, git_blob_hash
 from zmanifest.manifest import Manifest, ManifestEntry
-from zmanifest.resolve import fetch_uri, is_relative_uri, resolve_entry, resolve_uri
-from zmanifest.resolver import BlobResolver, GitResolver, TemplateResolver
+from zmanifest.resolve import (
+    Resolver,
+    build_base_chain,
+    get_file_base_resolve,
+    resolve_entry,
+)
+from zmanifest.resolver import HttpResolver, GitResolver
 
 # Type alias for mount opener callbacks (zarr Store-typed version)
 ZarrMountOpener = Callable[[ManifestEntry], Store]
-
-# Back-compat alias
 MountOpener = ZarrMountOpener
 
 
@@ -64,29 +67,20 @@ class ZMPWritableStore(Store):
       parquet file — metadata as ``text``, chunks as ``data``.
     - **External** (``chunk_dir="path/to/dir"``): chunks are written as
       files to the directory named by their git-sha1 hash; the manifest
-      references them via ``retrieval_key``.
+      references them via a resolve dict with a git oid.
 
     In both modes, JSON content (zarr.json etc.) is canonicalized via
     RFC 8785 before hashing so the git-sha1 is deterministic regardless
     of key ordering.
-
-    Use as a context manager or call :meth:`commit` explicitly::
-
-        with ZMPWritableStore.create("output.zmp") as store:
-            root = zarr.open_group(store=store, mode="w")
-            root.create_array("data", data=arr)
-        # .zmp file written on exit
 
     Args:
         output: Path for the output ``.zmp`` parquet file.
         chunk_dir: If set, write chunk blobs to this directory instead
             of inlining them. Directory is created if needed.
         max_rows_per_group: Override adaptive row group sizing.
-        data_compression: Parquet compression for the ``data`` column.
-            Default ``"none"`` (chunks are already compressed by zarr).
-            Use ``"zstd"`` or ``"snappy"`` for uncompressed zarr data.
         zarr_format: Zarr format version for file-level metadata.
         metadata: Additional key-value pairs for file-level metadata.
+        base_resolve: File-level base resolution params.
     """
 
     supports_writes = True
@@ -100,19 +94,17 @@ class ZMPWritableStore(Store):
         *,
         chunk_dir: str | Path | None = None,
         max_rows_per_group: int | None = None,
-        data_compression: str = "none",
-        data_compression_level: int | None = None,
         zarr_format: str = "3",
         metadata: dict[str, object] | None = None,
+        base_resolve: dict | None = None,
     ) -> None:
         super().__init__(read_only=False)
         self._output = Path(output)
         self._chunk_dir = Path(chunk_dir) if chunk_dir is not None else None
         self._max_rows_per_group = max_rows_per_group
-        self._data_compression = data_compression
-        self._data_compression_level = data_compression_level
         self._zarr_format = zarr_format
         self._metadata = metadata or {}
+        self._base_resolve = base_resolve
         self._entries: dict[str, bytes] = {}
         self._is_open = True
 
@@ -123,19 +115,17 @@ class ZMPWritableStore(Store):
         *,
         chunk_dir: str | Path | None = None,
         max_rows_per_group: int | None = None,
-        data_compression: str = "none",
-        data_compression_level: int | None = None,
         zarr_format: str = "3",
         metadata: dict[str, object] | None = None,
+        base_resolve: dict | None = None,
     ) -> ZMPWritableStore:
         return cls(
             output,
             chunk_dir=chunk_dir,
             max_rows_per_group=max_rows_per_group,
-            data_compression=data_compression,
-            data_compression_level=data_compression_level,
             zarr_format=zarr_format,
             metadata=metadata,
+            base_resolve=base_resolve,
         )
 
     def __enter__(self) -> ZMPWritableStore:
@@ -231,10 +221,9 @@ class ZMPWritableStore(Store):
 
         builder = Builder(
             zarr_format=self._zarr_format,
-            data_compression=self._data_compression,
-            data_compression_level=self._data_compression_level,
             max_rows_per_group=self._max_rows_per_group,
             metadata=self._metadata,
+            base_resolve=self._base_resolve,
         )
 
         for path in sorted(self._entries):
@@ -246,64 +235,97 @@ class ZMPWritableStore(Store):
                 text = canonical_json(raw.decode("utf-8"))
                 builder.add(path, text=text)
             elif external:
-                # External mode: write blob to chunk_dir, store retrieval_key only
+                # External mode: write blob to chunk_dir, add resolve with git oid
                 rk = git_blob_hash(raw)
                 blob_path = self._chunk_dir / rk
                 if not blob_path.exists():
                     blob_path.write_bytes(raw)
-                builder.add(path, retrieval_key=rk, size=len(raw))
+                builder.add(
+                    path,
+                    resolve={"git": {"oid": rk}},
+                    checksum=rk,
+                    size=len(raw),
+                )
             else:
-                # Embedded mode: inline binary data
+                # Embedded mode: zarr chunks are pre-compressed -> data column
                 builder.add(path, data=raw)
 
         return builder.write(self._output)
 
 
 # ---------------------------------------------------------------------------
-# Default mount opener (standalone, so users can call it as a fallback)
+# Default mount opener
 # ---------------------------------------------------------------------------
 
 
 def default_zmp_mount_opener(
     entry: ManifestEntry,
     *,
-    resolver: BlobResolver | None = None,
+    resolvers: dict[str, Resolver] | None = None,
     mount_opener: ZarrMountOpener | None = None,
-    base_uri: str | None = None,
+    base_resolve: list[dict] | None = None,
+    manifest: Manifest | None = None,
 ) -> Store:
-    """Default mount opener: opens .zmp and .zarr.zip targets.
+    """Default mount opener: opens .zmp mount targets.
 
-    Users can call this as a fallback inside a custom mount_opener to
-    handle standard mount types while adding their own logic for others.
-
-    Args:
-        entry: The manifest entry for the mount point.
-        resolver: BlobResolver to pass to child .zmp stores.
-        mount_opener: MountOpener to pass to child .zmp stores.
-        base_uri: Base URI for resolving relative uri values.
+    Supports external mounts (via resolve) and embedded mounts (via data column).
     """
-    uri = entry.uri
-    if uri is None:
-        raise ValueError(f"Mount entry {entry.path!r} has no uri")
+    # Try embedded mount first
+    if manifest is not None and (Addressing.DATA in entry.addressing or Addressing.DATA_Z in entry.addressing):
+        embedded_bytes = manifest.get_data(entry.path)
+        if embedded_bytes is not None:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".zmp", delete=False)
+            tmp.write(embedded_bytes)
+            tmp.close()
+            child_manifest = Manifest(tmp.name)
+            return ZMPStore(
+                manifest=child_manifest,
+                resolvers=resolvers,
+                mount_opener=mount_opener,
+                base_resolve=base_resolve,
+            )
 
-    # Resolve relative URIs against the parent's base
-    uri = resolve_uri(uri, base_uri)
+    # External mount via resolve
+    if entry.resolve is None:
+        raise ValueError(f"Mount entry {entry.path!r} has no resolve or embedded data")
 
-    if uri.endswith(".zmp"):
+    resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
+
+    # Try HTTP scheme to get the URL
+    http_params = resolve_dict.get("http")
+    if http_params and "url" in http_params:
+        url = http_params["url"]
+        # Resolve relative URL against base
+        if base_resolve:
+            for base in reversed(base_resolve):
+                http_base = base.get("http", {})
+                if "url" in http_base and "://" not in url and not url.startswith("/"):
+                    from urllib.parse import urljoin
+                    import os
+                    base_url = http_base["url"]
+                    if base_url.startswith(("http://", "https://")):
+                        url = urljoin(base_url, url)
+                    else:
+                        url = os.path.normpath(os.path.join(base_url, url))
+                    break
+
+        if url.endswith(".zarr.zip"):
+            from zarr.storage import ZipStore
+            zs = ZipStore(url, mode="r")
+            zs._sync_open()
+            return zs
+
         return ZMPStore.from_url(
-            uri, resolver=resolver, mount_opener=mount_opener,
+            url,
+            resolvers=resolvers,
+            mount_opener=mount_opener,
         )
-    elif uri.endswith(".zarr.zip"):
-        from zarr.storage import ZipStore
 
-        store = ZipStore(uri, mode="r")
-        store._sync_open()
-        return store
-    else:
-        raise ValueError(
-            f"Unsupported mount target {uri!r} — "
-            "only .zmp and .zarr.zip are supported"
-        )
+    raise ValueError(
+        f"Cannot resolve mount target for {entry.path!r} — "
+        f"resolve={entry.resolve}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -322,22 +344,24 @@ class ZMPStore(Store):
     def __init__(
         self,
         manifest: Manifest,
-        resolver: BlobResolver | None = None,
+        resolvers: dict[str, Resolver] | None = None,
         mount_opener: ZarrMountOpener | None = None,
-        base_uri: str | None = None,
+        base_resolve: list[dict] | None = None,
     ) -> None:
         super().__init__(read_only=True)
         self._manifest = manifest
-        self._resolver = resolver
+        self._resolvers = resolvers
         self._mount_opener = mount_opener or self._default_mount_opener
-        # base_uri precedence: API override > file metadata > None
-        if base_uri is not None:
-            self._base_uri: str | None = base_uri
+        # Build base_resolve chain: API override + file metadata
+        file_base = get_file_base_resolve(manifest)
+        if base_resolve is not None:
+            self._base_resolve = base_resolve
+        elif file_base is not None:
+            self._base_resolve = [file_base]
         else:
-            extra = self._manifest.metadata.get("extra", {})
-            self._base_uri = extra.get("base_uri") if extra else None
-        self._mounts: dict[str, Store] = {}  # prefix -> lazily opened store
-        self._mount_prefixes: list[str] = []  # sorted longest-first
+            self._base_resolve = None
+        self._mounts: dict[str, Store] = {}
+        self._mount_prefixes: list[str] = []
         self._init_mounts()
 
     def _init_mounts(self) -> None:
@@ -349,37 +373,34 @@ class ZMPStore(Store):
             entry = self._manifest.get_entry(path)
             if entry is not None and Addressing.MOUNT in entry.addressing:
                 prefixes.append(path)
-        # Sort longest first so deeper mounts match before shallower ones
         self._mount_prefixes = sorted(prefixes, key=len, reverse=True)
 
     def _find_mount(self, key: str) -> tuple[str, str] | None:
-        """Find the mount prefix for a key, if any.
-
-        Returns (mount_prefix, sub_key) or None.
-        """
         for prefix in self._mount_prefixes:
             if key.startswith(prefix):
                 return prefix, key[len(prefix) :]
         return None
 
     def _default_mount_opener(self, entry: ManifestEntry) -> Store:
-        """Default mount opener that inherits resolver, mount_opener, and base_uri."""
+        # Extend base chain with entry's base_resolve
+        chain = list(self._base_resolve or [])
+        if entry.base_resolve:
+            br = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
+            chain.append(br)
         return default_zmp_mount_opener(
             entry,
-            resolver=self._resolver,
+            resolvers=self._resolvers,
             mount_opener=self._mount_opener,
-            base_uri=entry.base_uri or self._base_uri,
+            base_resolve=chain or None,
+            manifest=self._manifest,
         )
 
     def _get_mount_store(self, prefix: str) -> Store:
-        """Open (or return cached) the store for a mount point."""
         if prefix in self._mounts:
             return self._mounts[prefix]
-
         entry = self._manifest.get_entry(prefix)
         if entry is None:
             raise KeyError(f"Mount point {prefix!r} not found")
-
         store = self._mount_opener(entry)
         self._mounts[prefix] = store
         return store
@@ -388,71 +409,31 @@ class ZMPStore(Store):
     def from_file(
         cls,
         path: str,
-        resolver: BlobResolver | None = None,
+        resolvers: dict[str, Resolver] | None = None,
         mount_opener: ZarrMountOpener | None = None,
-        base_uri: str | None = None,
     ) -> ZMPStore:
-        from zmanifest.resolve import base_uri_from_source
-
         manifest = Manifest(path)
-        if base_uri is None:
-            base_uri = base_uri_from_source(path)
         return cls(
-            manifest=manifest, resolver=resolver,
-            mount_opener=mount_opener, base_uri=base_uri,
+            manifest=manifest,
+            resolvers=resolvers,
+            mount_opener=mount_opener,
         )
 
     @classmethod
     def from_url(
         cls,
         manifest_url: str,
-        blobs: str | None = None,
         *,
-        resolver: BlobResolver | None = None,
+        resolvers: dict[str, Resolver] | None = None,
         mount_opener: ZarrMountOpener | None = None,
-        base_uri: str | None = None,
     ) -> ZMPStore:
-        """Open a ZMP store from a manifest path/URL and optional blob location.
-
-        The manifest is fetched if it's an HTTP(S) URL, otherwise read from
-        a local path.
-
-        The ``blobs`` argument is a URL template with ``{hash}`` as the
-        placeholder for the retrieval key. Supports slice syntax for
-        fanout conventions like ``{hash[:2]}/{hash[2:]}``.
-
-        - Ends with ``.git``: uses ``GitResolver`` (vost/dulwich)
-        - Contains ``{hash}``: uses ``TemplateResolver`` (local or HTTP)
-        - Plain path/URL without ``{hash}``: appends ``/{hash}`` automatically
-        - ``None``: no resolver (inline-only manifest)
-
-        If ``resolver`` is provided directly, it takes precedence over
-        ``blobs`` (the ``blobs`` argument is ignored).
-
-        Relative ``uri`` values in the manifest are resolved
-        against ``base_uri``. If not provided, ``base_uri`` falls back
-        to the ``base_uri`` file-level metadata key, then to the parent
-        directory of ``manifest_url``.
-
-        Examples::
-
-            ZMPStore.from_url("manifest.zmp")
-            ZMPStore.from_url("manifest.zmp", blobs="/data/repo.git")
-            ZMPStore.from_url("manifest.zmp", blobs="/data/blobs/{hash}")
-            ZMPStore.from_url("manifest.zmp", blobs="https://cdn.example.com/{hash[:2]}/{hash[2:]}")
-            ZMPStore.from_url("https://server.com/ds.zmp", blobs="https://blobs.server.com/{hash}")
+        """Open a ZMP store from a manifest path/URL.
 
         Args:
             manifest_url: Local path or HTTP(S) URL to the ``.zmp`` file.
-            blobs: URL template, git repo path, or base path for blob resolution.
-            resolver: Pre-built BlobResolver instance (overrides ``blobs``).
+            resolvers: Dict of scheme name -> Resolver instance.
             mount_opener: Custom callable to open child stores for mount entries.
-            base_uri: Base URI for resolving relative uri values.
-                Overrides file-level metadata and manifest URL derivation.
         """
-        from zmanifest.resolve import base_uri_from_source
-
-        # Fetch manifest if remote
         if manifest_url.startswith("http://") or manifest_url.startswith("https://"):
             import httpx
             import tempfile
@@ -466,23 +447,10 @@ class ZMPStore(Store):
         else:
             manifest = Manifest(manifest_url)
 
-        # Use provided resolver, or auto-create from blobs location
-        if resolver is None and blobs is not None:
-            if blobs.rstrip("/").endswith(".git"):
-                resolver = GitResolver(blobs)
-            else:
-                # If no {hash} placeholder, append /{hash} as default
-                if "{hash" not in blobs:
-                    blobs = blobs.rstrip("/") + "/{hash}"
-                resolver = TemplateResolver(blobs)
-
-        # Derive base_uri: API override > file metadata > manifest URL
-        if base_uri is None:
-            base_uri = base_uri_from_source(manifest_url)
-
         store = cls(
-            manifest=manifest, resolver=resolver,
-            mount_opener=mount_opener, base_uri=base_uri,
+            manifest=manifest,
+            resolvers=resolvers,
+            mount_opener=mount_opener,
         )
         store._is_open = True
         return store
@@ -501,11 +469,9 @@ class ZMPStore(Store):
 
     @staticmethod
     def _is_annotation(path: str) -> bool:
-        """Annotation rows: root ("") and path metadata ("group/")."""
         return path == "" or path.endswith("/")
 
     def _is_under_mount(self, path: str) -> bool:
-        """Check if a path falls under any mount prefix."""
         return self._find_mount(path) is not None
 
     async def get(
@@ -517,7 +483,6 @@ class ZMPStore(Store):
         if self._is_annotation(key):
             return None
 
-        # Check mounts first
         mount = self._find_mount(key)
         if mount is not None:
             prefix, sub_key = mount
@@ -528,8 +493,15 @@ class ZMPStore(Store):
         if entry is None:
             return None
 
-        base = entry.base_uri or self._base_uri
-        raw = await resolve_entry(entry, self._manifest, self._resolver, base)
+        # Build base chain with entry's own base_resolve
+        chain = list(self._base_resolve or [])
+        if entry.base_resolve:
+            br = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
+            chain.append(br)
+
+        raw = await resolve_entry(
+            entry, self._manifest, self._resolvers, chain or None,
+        )
         if raw is None:
             return None
 
@@ -542,7 +514,6 @@ class ZMPStore(Store):
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
     ) -> list[Buffer | None]:
         import asyncio
-
         coros = [
             self.get(key, prototype, byte_range)
             for key, byte_range in key_ranges
@@ -552,13 +523,11 @@ class ZMPStore(Store):
     async def exists(self, key: str) -> bool:
         if self._is_annotation(key):
             return False
-
         mount = self._find_mount(key)
         if mount is not None:
             prefix, sub_key = mount
             child = self._get_mount_store(prefix)
             return await child.exists(sub_key)
-
         return self._manifest.has(key)
 
     async def set(self, key: str, value: Buffer) -> None:
@@ -568,19 +537,16 @@ class ZMPStore(Store):
         raise NotImplementedError("ZMPStore is read-only")
 
     async def list(self) -> AsyncIterator[str]:
-        # Yield local entries (skip annotations and anything under mounts)
         for p in self._manifest.list_paths():
             if self._is_annotation(p) or self._is_under_mount(p):
                 continue
             yield p
-        # Yield entries from each mount, prepending the prefix
         for prefix in self._mount_prefixes:
             child = self._get_mount_store(prefix)
             async for p in child.list():
                 yield prefix + p
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
-        # Check if the prefix falls entirely within a mount
         mount = self._find_mount(prefix)
         if mount is not None:
             mount_prefix, sub_prefix = mount
@@ -588,14 +554,10 @@ class ZMPStore(Store):
             async for p in child.list_prefix(sub_prefix):
                 yield mount_prefix + p
             return
-
-        # Yield local entries under this prefix
         for p in self._manifest.list_prefix(prefix):
             if self._is_annotation(p) or self._is_under_mount(p):
                 continue
             yield p
-
-        # Yield from any mounts that are under this prefix
         for mount_prefix in self._mount_prefixes:
             if mount_prefix.startswith(prefix):
                 child = self._get_mount_store(mount_prefix)
@@ -603,11 +565,8 @@ class ZMPStore(Store):
                     yield mount_prefix + p
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
-        # Normalize prefix
         if prefix and not prefix.endswith("/"):
             prefix = prefix + "/"
-
-        # If prefix is inside a mount, delegate entirely
         mount = self._find_mount(prefix)
         if mount is not None:
             mount_prefix, sub_prefix = mount
@@ -615,22 +574,15 @@ class ZMPStore(Store):
             async for p in child.list_dir(sub_prefix):
                 yield p
             return
-
-        # Yield local directory entries
         seen: set[str] = set()
         for p in self._manifest.list_dir(prefix):
             if p != "":
                 seen.add(p)
                 yield p
-
-        # Add mount points as directory entries if they're direct
-        # children of this prefix
         for mp in self._mount_prefixes:
             if mp.startswith(prefix) and mp != prefix:
                 rest = mp[len(prefix) :]
-                # Direct child mount: "sub/" under prefix ""
                 slash_idx = rest.find("/")
                 if slash_idx == len(rest) - 1:
-                    # This mount is a direct child directory
                     if rest not in seen:
                         yield rest

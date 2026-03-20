@@ -42,7 +42,7 @@ class TestMount:
         """Mount a ZMP file and read through the parent store."""
         builder = Builder()
         builder.add("zarr.json", text=json.dumps({"zarr_format": 3, "node_type": "group"}))
-        builder.mount("scans/ct", str(child_zmp))
+        builder.mount("scans/ct", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -55,7 +55,7 @@ class TestMount:
         """Mount a zarr.zip and read through the parent store."""
         builder = Builder()
         builder.add("zarr.json", text=json.dumps({"zarr_format": 3, "node_type": "group"}))
-        builder.mount("scans/mri", str(child_zip))
+        builder.mount("scans/mri", resolve={"http": {"url": str(child_zip)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -67,7 +67,7 @@ class TestMount:
     def test_mount_addressing_flags(self, tmp_path: Path, child_zmp: Path) -> None:
         builder = Builder()
         builder.add("zarr.json", text='{}')
-        builder.mount("sub", str(child_zmp))
+        builder.mount("sub", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -75,12 +75,12 @@ class TestMount:
         entry = manifest.get_entry("sub/")
         assert entry is not None
         assert Addressing.MOUNT in entry.addressing
-        assert Addressing.URI in entry.addressing
+        assert Addressing.RESOLVE in entry.addressing
 
     def test_mount_exists(self, tmp_path: Path, child_zmp: Path) -> None:
         builder = Builder()
         builder.add("zarr.json", text='{}')
-        builder.mount("sub", str(child_zmp))
+        builder.mount("sub", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -96,7 +96,7 @@ class TestMount:
     def test_mount_list(self, tmp_path: Path, child_zmp: Path) -> None:
         builder = Builder()
         builder.add("zarr.json", text='{}')
-        builder.mount("sub", str(child_zmp))
+        builder.mount("sub", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -112,7 +112,7 @@ class TestMount:
     def test_mount_list_dir(self, tmp_path: Path, child_zmp: Path) -> None:
         builder = Builder()
         builder.add("zarr.json", text='{}')
-        builder.mount("sub", str(child_zmp))
+        builder.mount("sub", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -142,7 +142,7 @@ class TestMount:
             "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
         }))
         builder.add("local/c/0", data=np.array([10.0, 20.0], dtype="<f8").tobytes())
-        builder.mount("mounted", str(child_zmp))
+        builder.mount("mounted", resolve={"http": {"url": str(child_zmp)}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
@@ -158,12 +158,12 @@ class TestMount:
     def test_mount_unsupported_target(self, tmp_path: Path) -> None:
         builder = Builder()
         builder.add("zarr.json", text='{}')
-        builder.mount("sub", "/data/store.zarr")  # directory, not supported
+        builder.mount("sub", resolve={"unsupported_scheme": {"path": "/data/store.zarr"}})
         parent = tmp_path / "parent.zmp"
         builder.write(parent)
 
         store = ZMPStore.from_file(str(parent))
         store._is_open = True
 
-        with pytest.raises(ValueError, match="Unsupported mount target"):
+        with pytest.raises(ValueError, match="Cannot resolve mount target"):
             asyncio.run(store.exists("sub/zarr.json"))
