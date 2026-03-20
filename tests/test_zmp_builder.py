@@ -138,7 +138,7 @@ class TestBuilder:
         assert entry.chunk_key == "0"
 
     def test_sorted_output(self, tmp_path: Path) -> None:
-        """Rows are sorted by path regardless of insertion order."""
+        """Non-data rows come first (sorted), then data rows (sorted)."""
         builder = Builder()
         builder.add("zarr.json", text='{}')
         builder.add("b/c/0", data=b"\x01")
@@ -147,7 +147,8 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
         manifest = Manifest(str(zmp_path))
         paths = list(manifest.list_paths())
-        assert paths == sorted(paths)
+        # text row first, then data rows sorted
+        assert paths == ["zarr.json", "a/c/0", "b/c/0"]
 
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         builder = Builder(
