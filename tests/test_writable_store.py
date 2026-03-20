@@ -79,7 +79,7 @@ class TestEmbeddedWrite:
         assert data is not None
 
     def test_row_group_sizing_embedded(self, tmp_path: Path) -> None:
-        """Embedded mode: one data row per group, non-data in last group."""
+        """Embedded mode: data rows first, non-data second-to-last, index last."""
         zmp_path = tmp_path / "out.zmp"
         with ZMPWritableStore.create(zmp_path) as store:
             root = zarr.open_group(store=store, mode="w")
@@ -89,11 +89,13 @@ class TestEmbeddedWrite:
 
         pf = pq.ParquetFile(str(zmp_path))
         num_rgs = pf.metadata.num_row_groups
-        # Data rows: one per group (all but the last)
-        for i in range(num_rgs - 1):
+        # Data rows: one per group
+        for i in range(num_rgs - 2):
             assert pf.metadata.row_group(i).num_rows == 1
-        # Last group: non-data rows (metadata + index)
-        assert pf.metadata.row_group(num_rgs - 1).num_rows >= 1
+        # Second-to-last: non-data rows (metadata)
+        assert pf.metadata.row_group(num_rgs - 2).num_rows >= 1
+        # Last: index row alone
+        assert pf.metadata.row_group(num_rgs - 1).num_rows == 1
 
     def test_canonical_json_hashing(self, tmp_path: Path) -> None:
         """Metadata hashes use canonical JSON (RFC 8785)."""
