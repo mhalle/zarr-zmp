@@ -14,7 +14,25 @@ from zarr.abc.store import Store
 from zarr.core.buffer import default_buffer_prototype
 
 from zmanifest._types import compute_addressing
-from zmanifest.builder import git_blob_hash, _parse_array_path_and_chunk_key
+from zmanifest.builder import git_blob_hash
+
+
+def _parse_array_path_and_chunk_key(
+    path: str,
+) -> tuple[str | None, str | None]:
+    """Extract array_path and chunk_key from a zarr v3 path with a ``c/`` separator.
+
+    For ``temp/c/0/1``, returns ``("temp", "0/1")``.
+    Returns ``(None, None)`` if no ``c/`` separator is found.
+    """
+    parts = path.split("/")
+    try:
+        c_idx = parts.index("c")
+        array_path = "/".join(parts[:c_idx]) or None
+        chunk_key = "/".join(parts[c_idx + 1 :]) or None
+        return array_path, chunk_key
+    except ValueError:
+        return None, None
 
 
 async def _read_store(store: Store) -> dict[str, bytes]:

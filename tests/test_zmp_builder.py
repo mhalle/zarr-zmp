@@ -112,30 +112,18 @@ class TestBuilder:
         expected = hashlib.sha1(header + data).hexdigest()
         assert rk == expected
 
-    def test_array_path_inferred(self, tmp_path: Path) -> None:
+    def test_array_path_not_in_core_builder(self, tmp_path: Path) -> None:
+        """Core Builder does not write array_path/chunk_key columns.
+        Those are zarr-specific and added by build_zmp."""
+        import pyarrow.parquet as pq
+
         builder = Builder()
         builder.add("myarray/c/0/1", data=b"\x00")
         zmp_path = builder.write(tmp_path / "out.zmp")
 
-        manifest = Manifest(str(zmp_path))
-        entry = manifest.get_entry("myarray/c/0/1")
-        assert entry.array_path == "myarray"
-        assert entry.chunk_key == "0/1"
-
-    def test_array_path_explicit(self, tmp_path: Path) -> None:
-        builder = Builder()
-        builder.add(
-            "data/c/0",
-            data=b"\x00",
-            array_path="custom_array",
-            chunk_key="0",
-        )
-        zmp_path = builder.write(tmp_path / "out.zmp")
-
-        manifest = Manifest(str(zmp_path))
-        entry = manifest.get_entry("data/c/0")
-        assert entry.array_path == "custom_array"
-        assert entry.chunk_key == "0"
+        pf = pq.ParquetFile(str(zmp_path))
+        assert "array_path" not in pf.schema_arrow.names
+        assert "chunk_key" not in pf.schema_arrow.names
 
     def test_sorted_output(self, tmp_path: Path) -> None:
         """Non-data rows come first (sorted), then data rows (sorted)."""
