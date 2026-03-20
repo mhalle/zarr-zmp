@@ -284,6 +284,7 @@ def default_zmp_mount_opener(
 
             if is_zip:
                 from zarr.storage import ZipStore
+                # ZipStore requires a file path, not bytes
                 tmp = tempfile.NamedTemporaryFile(suffix=".zarr.zip", delete=False)
                 tmp.write(embedded_bytes)
                 tmp.close()
@@ -291,10 +292,8 @@ def default_zmp_mount_opener(
                 zs._sync_open()
                 return zs
             else:
-                tmp = tempfile.NamedTemporaryFile(suffix=".zmp", delete=False)
-                tmp.write(embedded_bytes)
-                tmp.close()
-                child_manifest = Manifest(tmp.name)
+                # Manifest can load from bytes directly
+                child_manifest = Manifest(embedded_bytes)
                 return ZMPStore(
                     manifest=child_manifest,
                     resolvers=resolvers,
