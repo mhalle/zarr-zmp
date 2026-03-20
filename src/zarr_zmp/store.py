@@ -350,7 +350,7 @@ class ZMPStore(Store):
     ) -> None:
         super().__init__(read_only=True)
         self._manifest = manifest
-        self._resolvers = resolvers
+        self._resolvers = resolvers if resolvers is not None else {"http": HttpResolver()}
         self._mount_opener = mount_opener or self._default_mount_opener
         # Build base_resolve chain: API override + file metadata
         file_base = get_file_base_resolve(manifest)
