@@ -352,14 +352,12 @@ class ZMPStore(Store):
         self._manifest = manifest
         self._resolvers = resolvers if resolvers is not None else {"http": HttpResolver()}
         self._mount_opener = mount_opener or self._default_mount_opener
-        # Build base_resolve chain: API override + file metadata
+        # Build base_resolve chain: location base + file metadata base
         file_base = get_file_base_resolve(manifest)
-        if base_resolve is not None:
-            self._base_resolve = base_resolve
-        elif file_base is not None:
-            self._base_resolve = [file_base]
-        else:
-            self._base_resolve = None
+        chain = list(base_resolve or [])
+        if file_base is not None:
+            chain.append(file_base)
+        self._base_resolve = chain or None
         self._mounts: dict[str, Store] = {}
         self._mount_prefixes: list[str] = []
         self._init_mounts()
@@ -413,10 +411,13 @@ class ZMPStore(Store):
         mount_opener: ZarrMountOpener | None = None,
     ) -> ZMPStore:
         manifest = Manifest(path)
+        # Derive location base from the manifest file's parent directory
+        location_base = [{"http": {"url": str(Path(path).resolve().parent) + "/"}}]
         return cls(
             manifest=manifest,
             resolvers=resolvers,
             mount_opener=mount_opener,
+            base_resolve=location_base,
         )
 
     @classmethod
@@ -429,15 +430,21 @@ class ZMPStore(Store):
     ) -> ZMPStore:
         """Open a ZMP store from a manifest path/URL.
 
+        The manifest's parent URL/directory is injected as the outermost
+        base_resolve for the ``http`` scheme, so relative URLs in the
+        manifest resolve against the manifest's location.
+
         Args:
             manifest_url: Local path or HTTP(S) URL to the ``.zmp`` file.
             resolvers: Dict of scheme name -> Resolver instance.
             mount_opener: Custom callable to open child stores for mount entries.
         """
+        # Derive location base from the manifest URL
         if manifest_url.startswith("http://") or manifest_url.startswith("https://"):
             import httpx
             import tempfile
 
+            location_base_url = manifest_url.rsplit("/", 1)[0] + "/"
             resp = httpx.get(manifest_url)
             resp.raise_for_status()
             tmp = tempfile.NamedTemporaryFile(suffix=".zmp", delete=False)
@@ -445,12 +452,16 @@ class ZMPStore(Store):
             tmp.close()
             manifest = Manifest(tmp.name)
         else:
+            location_base_url = str(Path(manifest_url).resolve().parent) + "/"
             manifest = Manifest(manifest_url)
+
+        location_base = [{"http": {"url": location_base_url}}]
 
         store = cls(
             manifest=manifest,
             resolvers=resolvers,
             mount_opener=mount_opener,
+            base_resolve=location_base,
         )
         store._is_open = True
         return store
