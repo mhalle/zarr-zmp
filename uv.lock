@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "zarr-zmp"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "zarr" },
@@ -520,7 +520,7 @@ provides-extras = ["git", "http", "test"]
 
 [[package]]
 name = "zmanifest"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "../zmanifest" }
 dependencies = [
     { name = "pyarrow" },

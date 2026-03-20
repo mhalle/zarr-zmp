@@ -275,16 +275,32 @@ def default_zmp_mount_opener(
         embedded_bytes = manifest.get_data(entry.path)
         if embedded_bytes is not None:
             import tempfile
-            tmp = tempfile.NamedTemporaryFile(suffix=".zmp", delete=False)
-            tmp.write(embedded_bytes)
-            tmp.close()
-            child_manifest = Manifest(tmp.name)
-            return ZMPStore(
-                manifest=child_manifest,
-                resolvers=resolvers,
-                mount_opener=mount_opener,
-                base_resolve=base_resolve,
+
+            # Detect type from content_type or by probing the bytes
+            is_zip = (
+                entry.content_type in ("application/zip", "application/x-zip-compressed")
+                or (embedded_bytes[:4] == b"PK\x03\x04")  # ZIP magic bytes
             )
+
+            if is_zip:
+                from zarr.storage import ZipStore
+                tmp = tempfile.NamedTemporaryFile(suffix=".zarr.zip", delete=False)
+                tmp.write(embedded_bytes)
+                tmp.close()
+                zs = ZipStore(tmp.name, mode="r")
+                zs._sync_open()
+                return zs
+            else:
+                tmp = tempfile.NamedTemporaryFile(suffix=".zmp", delete=False)
+                tmp.write(embedded_bytes)
+                tmp.close()
+                child_manifest = Manifest(tmp.name)
+                return ZMPStore(
+                    manifest=child_manifest,
+                    resolvers=resolvers,
+                    mount_opener=mount_opener,
+                    base_resolve=base_resolve,
+                )
 
     # External mount via resolve
     if entry.resolve is None:
