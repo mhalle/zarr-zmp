@@ -1,6 +1,6 @@
 [project]
 name = "zarr-zmp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Zarr v3 store adapter for ZMP (Manifest Parquet) files"
 readme = "README.md"
 authors = [
@@ -18,7 +18,7 @@ http = ["zmanifest[http]"]
 test = ["pytest", "pytest-asyncio", "vost>=0.78.1"]
 
 [tool.uv.sources]
-zmanifest = { git = "https://github.com/mhalle/zmanifest.git" }
+zmanifest = { path = "../zmanifest", editable = true }
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]

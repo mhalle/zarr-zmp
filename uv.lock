@@ -450,7 +450,7 @@ wheels = [
 
 [[package]]
 name = "zarr-zmp"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "zarr" },
@@ -476,16 +476,16 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'" },
     { name = "vost", marker = "extra == 'test'", specifier = ">=0.78.1" },
     { name = "zarr", specifier = ">=3.0" },
-    { name = "zmanifest", git = "https://github.com/mhalle/zmanifest.git" },
-    { name = "zmanifest", extras = ["git"], marker = "extra == 'git'", git = "https://github.com/mhalle/zmanifest.git" },
-    { name = "zmanifest", extras = ["http"], marker = "extra == 'http'", git = "https://github.com/mhalle/zmanifest.git" },
+    { name = "zmanifest", editable = "../zmanifest" },
+    { name = "zmanifest", extras = ["git"], marker = "extra == 'git'", editable = "../zmanifest" },
+    { name = "zmanifest", extras = ["http"], marker = "extra == 'http'", editable = "../zmanifest" },
 ]
 provides-extras = ["git", "http", "test"]
 
 [[package]]
 name = "zmanifest"
-version = "0.3.0"
-source = { git = "https://github.com/mhalle/zmanifest.git#4e3c522a93eb7bb20eb39aaa27cb5af93195db68" }
+version = "0.4.0"
+source = { editable = "../zmanifest" }
 dependencies = [
     { name = "pyarrow" },
     { name = "rfc8785" },
@@ -498,3 +498,15 @@ git = [
 http = [
     { name = "httpx" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", marker = "extra == 'http'" },
+    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest-asyncio", marker = "extra == 'test'" },
+    { name = "rfc8785", specifier = ">=0.1.4" },
+    { name = "vost", marker = "extra == 'git'", specifier = ">=0.78.1" },
+    { name = "vost", marker = "extra == 'test'", specifier = ">=0.78.1" },
+]
+provides-extras = ["git", "http", "test"]

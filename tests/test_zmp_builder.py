@@ -147,8 +147,8 @@ class TestBuilder:
         zmp_path = builder.write(tmp_path / "out.zmp")
         manifest = Manifest(str(zmp_path))
         paths = list(manifest.list_paths())
-        # text row first, then data rows sorted
-        assert paths == ["zarr.json", "a/c/0", "b/c/0"]
+        # root index row first, then text, then data rows sorted
+        assert paths == ["", "zarr.json", "a/c/0", "b/c/0"]
 
     def test_file_level_metadata(self, tmp_path: Path) -> None:
         builder = Builder(

@@ -79,7 +79,7 @@ class TestEmbeddedWrite:
         assert data is not None
 
     def test_row_group_sizing_embedded(self, tmp_path: Path) -> None:
-        """Embedded mode defaults to 2 rows per group."""
+        """Embedded mode: non-data in first group, then one data row per group."""
         zmp_path = tmp_path / "out.zmp"
         with ZMPWritableStore.create(zmp_path) as store:
             root = zarr.open_group(store=store, mode="w")
@@ -88,8 +88,9 @@ class TestEmbeddedWrite:
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(str(zmp_path))
-        for i in range(pf.metadata.num_row_groups):
-            assert pf.metadata.row_group(i).num_rows <= 2
+        # First group is non-data (index + metadata), rest are 1 row each
+        for i in range(1, pf.metadata.num_row_groups):
+            assert pf.metadata.row_group(i).num_rows == 1
 
     def test_canonical_json_hashing(self, tmp_path: Path) -> None:
         """Metadata hashes use canonical JSON (RFC 8785)."""
@@ -116,7 +117,10 @@ class TestEmbeddedWrite:
 
         manifest = Manifest(str(zmp_path))
         for path in manifest.list_paths():
+            if path == "":
+                continue  # root/index row has no retrieval key
             entry = manifest.get_entry(path)
+            assert entry is not None
             assert entry.retrieval_key is not None
             assert len(entry.retrieval_key) == 40  # SHA-1 hex
 
