@@ -83,9 +83,8 @@ def simple_zmp(tmp_path: Path) -> Path:
     )
 
     file_meta = {
-        b"zmp_version": b'"0.1.0"',
-        b"zarr_format": b'"3"',
-        b"retrieval_scheme": b'"sha256"',
+        b"zmp_version": b"0.2.0",
+        b"zarr_format": b"3",
     }
     schema = table.schema.with_metadata(file_meta)
     table = table.cast(schema)

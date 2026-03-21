@@ -18,9 +18,8 @@ from zarr_zmp import Manifest, ZMPStore
 class TestManifest:
     def test_metadata(self, simple_zmp: Path) -> None:
         m = Manifest(str(simple_zmp))
-        assert m.metadata["zmp_version"] == "0.1.0"
+        assert m.metadata["zmp_version"] == "0.2.0"
         assert m.metadata["zarr_format"] == "3"
-        assert m.metadata["retrieval_scheme"] == "sha256"
 
     def test_has(self, simple_zmp: Path) -> None:
         m = Manifest(str(simple_zmp))
