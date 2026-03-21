@@ -378,20 +378,37 @@ class ZMPStore(Store):
         self._init_mounts()
 
     def _init_mounts(self) -> None:
-        """Discover mount points from the manifest."""
-        prefixes = []
+        """Discover mount points and directory links from the manifest."""
+        mount_prefixes = []
+        link_prefixes: dict[str, str] = {}  # prefix -> target
         for path in self._manifest.list_paths():
             if not path.endswith("/"):
                 continue
             entry = self._manifest.get_entry(path)
-            if entry is not None and Addressing.MOUNT in entry.addressing:
-                prefixes.append(path)
-        self._mount_prefixes = sorted(prefixes, key=len, reverse=True)
+            if entry is None:
+                continue
+            if Addressing.MOUNT in entry.addressing:
+                mount_prefixes.append(path)
+            elif Addressing.LINK in entry.addressing and entry.resolve:
+                resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
+                path_params = resolve_dict.get("_path", {})
+                target = path_params.get("target")
+                if target is not None:
+                    link_prefixes[path] = target
+        self._mount_prefixes = sorted(mount_prefixes, key=len, reverse=True)
+        self._link_prefixes = dict(sorted(link_prefixes.items(), key=lambda x: len(x[0]), reverse=True))
 
     def _find_mount(self, key: str) -> tuple[str, str] | None:
         for prefix in self._mount_prefixes:
             if key.startswith(prefix):
                 return prefix, key[len(prefix) :]
+        return None
+
+    def _find_dir_link(self, key: str) -> str | None:
+        """Rewrite a key through directory links. Returns the rewritten key or None."""
+        for prefix, target in self._link_prefixes.items():
+            if key.startswith(prefix):
+                return target + key[len(prefix) :]
         return None
 
     def _default_mount_opener(self, entry: ManifestEntry) -> Store:
@@ -509,11 +526,17 @@ class ZMPStore(Store):
         if self._is_annotation(key):
             return None
 
+        # Check mounts
         mount = self._find_mount(key)
         if mount is not None:
             prefix, sub_key = mount
             child = self._get_mount_store(prefix)
             return await child.get(sub_key, prototype, byte_range)
+
+        # Check directory links — rewrite and re-resolve
+        rewritten = self._find_dir_link(key)
+        if rewritten is not None:
+            return await self.get(rewritten, prototype, byte_range)
 
         entry = self._manifest.get_entry(key)
         if entry is None:
@@ -554,6 +577,9 @@ class ZMPStore(Store):
             prefix, sub_key = mount
             child = self._get_mount_store(prefix)
             return await child.exists(sub_key)
+        rewritten = self._find_dir_link(key)
+        if rewritten is not None:
+            return await self.exists(rewritten)
         return self._manifest.has(key)
 
     async def set(self, key: str, value: Buffer) -> None:
@@ -562,17 +588,28 @@ class ZMPStore(Store):
     async def delete(self, key: str) -> None:
         raise NotImplementedError("ZMPStore is read-only")
 
+    def _is_under_dir_link(self, path: str) -> bool:
+        return self._find_dir_link(path) is not None
+
     async def list(self) -> AsyncIterator[str]:
         for p in self._manifest.list_paths():
-            if self._is_annotation(p) or self._is_under_mount(p):
+            if self._is_annotation(p) or self._is_under_mount(p) or self._is_under_dir_link(p):
                 continue
             yield p
+        # Entries from mounts
         for prefix in self._mount_prefixes:
             child = self._get_mount_store(prefix)
             async for p in child.list():
                 yield prefix + p
+        # Entries through directory links
+        for link_prefix, target in self._link_prefixes.items():
+            for p in self._manifest.list_prefix(target):
+                if self._is_annotation(p):
+                    continue
+                yield link_prefix + p[len(target):]
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+        # Check mounts
         mount = self._find_mount(prefix)
         if mount is not None:
             mount_prefix, sub_prefix = mount
@@ -580,19 +617,39 @@ class ZMPStore(Store):
             async for p in child.list_prefix(sub_prefix):
                 yield mount_prefix + p
             return
+        # Check directory links
+        rewritten = self._find_dir_link(prefix)
+        if rewritten is not None:
+            async for p in self.list_prefix(rewritten):
+                # Re-map back to the link prefix
+                for lp, target in self._link_prefixes.items():
+                    if p.startswith(target):
+                        yield lp + p[len(target):]
+                        break
+            return
+        # Local entries
         for p in self._manifest.list_prefix(prefix):
             if self._is_annotation(p) or self._is_under_mount(p):
                 continue
             yield p
+        # Mounts under this prefix
         for mount_prefix in self._mount_prefixes:
             if mount_prefix.startswith(prefix):
                 child = self._get_mount_store(mount_prefix)
                 async for p in child.list():
                     yield mount_prefix + p
+        # Directory links under this prefix
+        for link_prefix, target in self._link_prefixes.items():
+            if link_prefix.startswith(prefix):
+                for p in self._manifest.list_prefix(target):
+                    if self._is_annotation(p):
+                        continue
+                    yield link_prefix + p[len(target):]
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
         if prefix and not prefix.endswith("/"):
             prefix = prefix + "/"
+        # If inside a mount, delegate
         mount = self._find_mount(prefix)
         if mount is not None:
             mount_prefix, sub_prefix = mount
@@ -600,15 +657,33 @@ class ZMPStore(Store):
             async for p in child.list_dir(sub_prefix):
                 yield p
             return
+        # If inside a directory link, rewrite and list
+        rewritten = self._find_dir_link(prefix)
+        if rewritten is not None:
+            async for p in self.list_dir(rewritten):
+                yield p
+            return
+        # Local entries
         seen: set[str] = set()
         for p in self._manifest.list_dir(prefix):
             if p != "":
                 seen.add(p)
                 yield p
+        # Mount points as directory entries
         for mp in self._mount_prefixes:
             if mp.startswith(prefix) and mp != prefix:
-                rest = mp[len(prefix) :]
+                rest = mp[len(prefix):]
                 slash_idx = rest.find("/")
                 if slash_idx == len(rest) - 1:
                     if rest not in seen:
+                        seen.add(rest)
+                        yield rest
+        # Directory links as directory entries
+        for lp in self._link_prefixes:
+            if lp.startswith(prefix) and lp != prefix:
+                rest = lp[len(prefix):]
+                slash_idx = rest.find("/")
+                if slash_idx == len(rest) - 1:
+                    if rest not in seen:
+                        seen.add(rest)
                         yield rest
