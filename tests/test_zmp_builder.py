@@ -87,9 +87,10 @@ class TestBuilder:
         assert entry.text is None
         assert manifest.get_data("arr/c/0") is None
 
-    def test_retrieval_keys_raw_text(self, tmp_path: Path) -> None:
-        """Builder hashes raw text bytes (no implicit canonicalization)."""
+    def test_json_text_canonicalized(self, tmp_path: Path) -> None:
+        """JSON text in .json paths is canonicalized before hashing."""
         import hashlib
+        import rfc8785
 
         text = '{"b": 1, "a": 2}'
         builder = Builder()
@@ -99,11 +100,14 @@ class TestBuilder:
         manifest = Manifest(str(zmp_path))
         entry = manifest.get_entry("zarr.json")
 
-        raw = text.encode("utf-8")
-        header = f"blob {len(raw)}\0".encode()
-        expected = hashlib.sha1(header + raw).hexdigest()
+        # Checksum is of the canonical form, not the raw input
+        canonical = rfc8785.dumps(json.loads(text))
+        header = f"blob {len(canonical)}\0".encode()
+        expected = hashlib.sha1(header + canonical).hexdigest()
 
         assert entry.checksum == expected
+        # Text stored is also canonical
+        assert entry.text == canonical.decode("utf-8")
 
     def test_data_hash_is_raw(self, tmp_path: Path) -> None:
         """Data hashes are git-sha1 of raw bytes (not canonicalized)."""
