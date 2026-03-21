@@ -382,19 +382,19 @@ class ZMPStore(Store):
         mount_prefixes = []
         link_prefixes: dict[str, str] = {}  # prefix -> target
         for path in self._manifest.list_paths():
-            if not path.endswith("/"):
-                continue
             entry = self._manifest.get_entry(path)
             if entry is None:
                 continue
+            if Addressing.FOLDER not in entry.addressing:
+                continue
             if Addressing.MOUNT in entry.addressing:
-                mount_prefixes.append(path)
+                mount_prefixes.append(path + "/")
             elif Addressing.LINK in entry.addressing and entry.resolve:
                 resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
                 path_params = resolve_dict.get("_path", {})
                 target = path_params.get("target")
                 if target is not None:
-                    link_prefixes[path] = target
+                    link_prefixes[path + "/"] = target + "/"
         self._mount_prefixes = sorted(mount_prefixes, key=len, reverse=True)
         self._link_prefixes = dict(sorted(link_prefixes.items(), key=lambda x: len(x[0]), reverse=True))
 
@@ -428,7 +428,8 @@ class ZMPStore(Store):
     def _get_mount_store(self, prefix: str) -> Store:
         if prefix in self._mounts:
             return self._mounts[prefix]
-        entry = self._manifest.get_entry(prefix)
+        # Manifest stores paths without trailing /
+        entry = self._manifest.get_entry(prefix.rstrip("/"))
         if entry is None:
             raise KeyError(f"Mount point {prefix!r} not found")
         store = self._mount_opener(entry)
@@ -510,9 +511,13 @@ class ZMPStore(Store):
     async def close(self) -> None:
         self._is_open = False
 
-    @staticmethod
-    def _is_annotation(path: str) -> bool:
-        return path == "" or path.endswith("/")
+    def _is_annotation(self, path: str) -> bool:
+        if path == "":
+            return True
+        entry = self._manifest.get_entry(path)
+        if entry is not None:
+            return Addressing.FOLDER in entry.addressing
+        return False
 
     def _is_under_mount(self, path: str) -> bool:
         return self._find_mount(path) is not None

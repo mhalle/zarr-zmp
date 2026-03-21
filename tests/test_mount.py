@@ -72,9 +72,10 @@ class TestMount:
         builder.write(parent)
 
         manifest = Manifest(str(parent))
-        entry = manifest.get_entry("sub/")
+        entry = manifest.get_entry("sub")
         assert entry is not None
         assert Addressing.MOUNT in entry.addressing
+        assert Addressing.FOLDER in entry.addressing
         assert Addressing.RESOLVE in entry.addressing
 
     def test_mount_exists(self, tmp_path: Path, child_zmp: Path) -> None:
