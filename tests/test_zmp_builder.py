@@ -48,10 +48,10 @@ class TestBuilder:
         group = zarr.open_group(store=store, mode="r")
         np.testing.assert_array_equal(group["arr"][:], [1.0, 2.0, 3.0, 4.0])
 
-    def test_root_metadata_invisible_to_store(self, tmp_path: Path) -> None:
-        """Root row is hidden from zarr Store interface."""
+    def test_archive_metadata_invisible_to_store(self, tmp_path: Path) -> None:
+        """Archive row is hidden from zarr Store interface."""
         builder = Builder()
-        builder.set_root_metadata({"test": True})
+        builder.set_archive_metadata({"test": True})
         builder.add("zarr.json", text='{"zarr_format":3,"node_type":"group"}')
         zmp_path = builder.write(tmp_path / "out.zmp")
 
