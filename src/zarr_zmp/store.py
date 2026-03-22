@@ -17,6 +17,7 @@ from zarr.core.buffer import Buffer, BufferPrototype
 from zmanifest._types import Addressing
 from zmanifest.builder import Builder, canonical_json, git_blob_hash
 from zmanifest.manifest import Manifest, ManifestEntry
+from zmanifest.path import ZPath
 from zmanifest.resolve import (
     Resolver,
     build_base_chain,
@@ -28,6 +29,10 @@ from zmanifest.resolver import HttpResolver, GitResolver
 # Type alias for mount opener callbacks (zarr Store-typed version)
 ZarrMountOpener = Callable[[ManifestEntry], Store]
 MountOpener = ZarrMountOpener
+
+_ZARR_METADATA_NAMES = frozenset(
+    ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,10 +52,9 @@ def _apply_byte_range(data: bytes, byte_range: ByteRequest | None) -> bytes:
     return data
 
 
-def _is_zarr_metadata(path: str) -> bool:
+def _is_zarr_metadata(path: ZPath) -> bool:
     """Check if a path is a zarr metadata file."""
-    basename = path.rsplit("/", 1)[-1] if "/" in path else path
-    return basename in ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
+    return path.name in _ZARR_METADATA_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +109,7 @@ class ZMPWritableStore(Store):
         self._zarr_format = zarr_format
         self._metadata = metadata or {}
         self._base_resolve = base_resolve
-        self._entries: dict[str, bytes] = {}
+        self._entries: dict[str, bytes] = {}  # keyed by zarr bare path
         self._is_open = True
 
     @classmethod
@@ -187,25 +191,27 @@ class ZMPWritableStore(Store):
             yield p
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
-        for p in sorted(self._entries):
-            if p.startswith(prefix):
-                yield p
+        # zarr passes bare prefix strings
+        zprefix = ZPath.from_zarr(prefix)
+        for key in sorted(self._entries):
+            zkey = ZPath.from_zarr(key)
+            if zkey.is_equal_or_child_of(zprefix):
+                yield key
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
-        if prefix and not prefix.endswith("/"):
-            prefix = prefix + "/"
-        result: set[str] = set()
-        for p in self._entries:
-            if not p.startswith(prefix):
+        zprefix = ZPath.from_zarr(prefix)
+        seen: set[str] = set()
+        for key in self._entries:
+            zkey = ZPath.from_zarr(key)
+            child = zkey.child_name_under(zprefix)
+            if child is None:
                 continue
-            rest = p[len(prefix) :]
-            slash_idx = rest.find("/")
-            if slash_idx == -1:
-                result.add(rest)
-            else:
-                result.add(rest[: slash_idx + 1])
-        for item in sorted(result):
-            yield item
+            # If this child has deeper entries, it's a directory
+            is_dir = (zprefix / child) != zkey
+            entry = child + "/" if is_dir else child
+            if entry not in seen:
+                seen.add(entry)
+                yield entry
 
     def commit(self) -> Path:
         """Flush buffered writes to the ZMP parquet file.
@@ -226,29 +232,27 @@ class ZMPWritableStore(Store):
             base_resolve=self._base_resolve,
         )
 
-        for path in sorted(self._entries):
-            raw = self._entries[path]
-            is_meta = _is_zarr_metadata(path)
+        for key in sorted(self._entries):
+            raw = self._entries[key]
+            zpath = ZPath.from_zarr(key)
+            is_meta = _is_zarr_metadata(zpath)
 
             if is_meta:
-                # Zarr metadata: canonicalize JSON, then add as text
                 text = canonical_json(raw.decode("utf-8"))
-                builder.add(path, text=text)
+                builder.add(key, text=text)
             elif external:
-                # External mode: write blob to chunk_dir, add resolve with git oid
                 rk = git_blob_hash(raw)
                 blob_path = self._chunk_dir / rk
                 if not blob_path.exists():
                     blob_path.write_bytes(raw)
                 builder.add(
-                    path,
+                    key,
                     resolve={"git": {"oid": rk}},
                     checksum=rk,
                     size=len(raw),
                 )
             else:
-                # Embedded mode: zarr chunks are pre-compressed -> data column
-                builder.add(path, data=raw)
+                builder.add(key, data=raw)
 
         return builder.write(self._output)
 
@@ -276,15 +280,13 @@ def default_zmp_mount_opener(
         if embedded_bytes is not None:
             import tempfile
 
-            # Detect type from content_type or by probing the bytes
             is_zip = (
                 entry.content_type in ("application/zip", "application/x-zip-compressed")
-                or (embedded_bytes[:4] == b"PK\x03\x04")  # ZIP magic bytes
+                or (embedded_bytes[:4] == b"PK\x03\x04")
             )
 
             if is_zip:
                 from zarr.storage import ZipStore
-                # ZipStore requires a file path, not bytes
                 tmp = tempfile.NamedTemporaryFile(suffix=".zarr.zip", delete=False)
                 tmp.write(embedded_bytes)
                 tmp.close()
@@ -292,7 +294,6 @@ def default_zmp_mount_opener(
                 zs._sync_open()
                 return zs
             else:
-                # Manifest can load from bytes directly
                 child_manifest = Manifest(embedded_bytes)
                 return ZMPStore(
                     manifest=child_manifest,
@@ -307,11 +308,9 @@ def default_zmp_mount_opener(
 
     resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
 
-    # Try HTTP scheme to get the URL
     http_params = resolve_dict.get("http")
     if http_params and "url" in http_params:
         url = http_params["url"]
-        # Resolve relative URL against base
         if base_resolve:
             for base in reversed(base_resolve):
                 http_base = base.get("http", {})
@@ -367,52 +366,63 @@ class ZMPStore(Store):
         self._manifest = manifest
         self._resolvers = resolvers if resolvers is not None else {"http": HttpResolver()}
         self._mount_opener = mount_opener or self._default_mount_opener
-        # Build base_resolve chain: location base + file metadata base
         file_base = get_file_base_resolve(manifest)
         chain = list(base_resolve or [])
         if file_base is not None:
             chain.append(file_base)
         self._base_resolve = chain or None
-        self._mounts: dict[str, Store] = {}
-        self._mount_prefixes: list[str] = []
+        self._mounts: dict[ZPath, Store] = {}
+        self._mount_prefixes: list[ZPath] = []
+        self._link_prefixes: dict[ZPath, ZPath] = {}
         self._init_mounts()
 
     def _init_mounts(self) -> None:
         """Discover mount points and directory links from the manifest."""
-        mount_prefixes = []
-        link_prefixes: dict[str, str] = {}  # prefix -> target
+        mount_prefixes: list[ZPath] = []
+        link_prefixes: dict[ZPath, ZPath] = {}
         for path in self._manifest.list_paths():
             entry = self._manifest.get_entry(path)
             if entry is None:
                 continue
             if Addressing.FOLDER not in entry.addressing:
                 continue
+            zpath = ZPath.from_zarr(path)
             if Addressing.MOUNT in entry.addressing:
-                mount_prefixes.append(path + "/")
+                mount_prefixes.append(zpath)
             elif Addressing.LINK in entry.addressing and entry.resolve:
                 resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
                 path_params = resolve_dict.get("_path", {})
                 target = path_params.get("target")
                 if target is not None:
-                    link_prefixes[path + "/"] = target + "/"
-        self._mount_prefixes = sorted(mount_prefixes, key=len, reverse=True)
-        self._link_prefixes = dict(sorted(link_prefixes.items(), key=lambda x: len(x[0]), reverse=True))
+                    link_prefixes[zpath] = ZPath.from_zarr(target)
+        # Sort longest-first for proper prefix matching
+        self._mount_prefixes = sorted(mount_prefixes, key=lambda p: p.depth, reverse=True)
+        self._link_prefixes = dict(
+            sorted(link_prefixes.items(), key=lambda x: x[0].depth, reverse=True)
+        )
 
-    def _find_mount(self, key: str) -> tuple[str, str] | None:
-        for prefix in self._mount_prefixes:
-            if key.startswith(prefix):
-                return prefix, key[len(prefix) :]
+    def _find_mount(self, key: ZPath, *, include_self: bool = False) -> tuple[ZPath, str] | None:
+        """Find mount for key. Returns (mount_path, sub_key_zarr) or None.
+
+        If ``include_self`` is True, also matches when key equals the mount path
+        (used by list_dir to delegate listing the mount root).
+        """
+        for mount in self._mount_prefixes:
+            if key.is_child_of(mount):
+                return mount, key.relative_to(mount)
+            if include_self and key == mount:
+                return mount, ""
         return None
 
-    def _find_dir_link(self, key: str) -> str | None:
-        """Rewrite a key through directory links. Returns the rewritten key or None."""
+    def _find_dir_link(self, key: ZPath) -> ZPath | None:
+        """Rewrite a key through directory links. Returns the rewritten ZPath or None."""
         for prefix, target in self._link_prefixes.items():
-            if key.startswith(prefix):
-                return target + key[len(prefix) :]
+            if key.is_child_of(prefix):
+                rel = key.relative_to(prefix)
+                return target / rel
         return None
 
     def _default_mount_opener(self, entry: ManifestEntry) -> Store:
-        # Extend base chain with entry's base_resolve
         chain = list(self._base_resolve or [])
         if entry.base_resolve:
             br = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
@@ -425,15 +435,14 @@ class ZMPStore(Store):
             manifest=self._manifest,
         )
 
-    def _get_mount_store(self, prefix: str) -> Store:
-        if prefix in self._mounts:
-            return self._mounts[prefix]
-        # Manifest stores paths without trailing /
-        entry = self._manifest.get_entry(prefix.rstrip("/"))
+    def _get_mount_store(self, mount: ZPath) -> Store:
+        if mount in self._mounts:
+            return self._mounts[mount]
+        entry = self._manifest.get_entry(mount.to_zarr())
         if entry is None:
-            raise KeyError(f"Mount point {prefix!r} not found")
+            raise KeyError(f"Mount point {mount!r} not found")
         store = self._mount_opener(entry)
-        self._mounts[prefix] = store
+        self._mounts[mount] = store
         return store
 
     @classmethod
@@ -444,7 +453,6 @@ class ZMPStore(Store):
         mount_opener: ZarrMountOpener | None = None,
     ) -> ZMPStore:
         manifest = Manifest(path)
-        # Derive location base from the manifest file's parent directory
         location_base = [{"http": {"url": str(Path(path).resolve().parent) + "/"}}]
         return cls(
             manifest=manifest,
@@ -461,18 +469,7 @@ class ZMPStore(Store):
         resolvers: dict[str, Resolver] | None = None,
         mount_opener: ZarrMountOpener | None = None,
     ) -> ZMPStore:
-        """Open a ZMP store from a manifest path/URL.
-
-        The manifest's parent URL/directory is injected as the outermost
-        base_resolve for the ``http`` scheme, so relative URLs in the
-        manifest resolve against the manifest's location.
-
-        Args:
-            manifest_url: Local path or HTTP(S) URL to the ``.zmp`` file.
-            resolvers: Dict of scheme name -> Resolver instance.
-            mount_opener: Custom callable to open child stores for mount entries.
-        """
-        # Derive location base from the manifest URL
+        """Open a ZMP store from a manifest path/URL."""
         if manifest_url.startswith("http://") or manifest_url.startswith("https://"):
             import httpx
             import tempfile
@@ -511,16 +508,17 @@ class ZMPStore(Store):
     async def close(self) -> None:
         self._is_open = False
 
-    def _is_annotation(self, path: str) -> bool:
-        if path == "":
+    def _is_annotation(self, key: ZPath) -> bool:
+        if key.is_root:
             return True
-        entry = self._manifest.get_entry(path)
+        entry = self._manifest.get_entry(key.to_zarr())
         if entry is not None:
             return Addressing.FOLDER in entry.addressing
         return False
 
-    def _is_under_mount(self, path: str) -> bool:
-        return self._find_mount(path) is not None
+    # -- Zarr Store interface --------------------------------------------------
+    # All methods receive bare zarr strings, convert to ZPath internally,
+    # and yield bare strings back to zarr.
 
     async def get(
         self,
@@ -528,26 +526,27 @@ class ZMPStore(Store):
         prototype: BufferPrototype,
         byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
-        if self._is_annotation(key):
+        zkey = ZPath.from_zarr(key)
+
+        if self._is_annotation(zkey):
             return None
 
         # Check mounts
-        mount = self._find_mount(key)
+        mount = self._find_mount(zkey)
         if mount is not None:
-            prefix, sub_key = mount
-            child = self._get_mount_store(prefix)
+            mount_path, sub_key = mount
+            child = self._get_mount_store(mount_path)
             return await child.get(sub_key, prototype, byte_range)
 
-        # Check directory links — rewrite and re-resolve
-        rewritten = self._find_dir_link(key)
+        # Check directory links
+        rewritten = self._find_dir_link(zkey)
         if rewritten is not None:
-            return await self.get(rewritten, prototype, byte_range)
+            return await self.get(rewritten.to_zarr(), prototype, byte_range)
 
         entry = self._manifest.get_entry(key)
         if entry is None:
             return None
 
-        # Build base chain with entry's own base_resolve
         chain = list(self._base_resolve or [])
         if entry.base_resolve:
             br = json.loads(entry.base_resolve) if isinstance(entry.base_resolve, str) else entry.base_resolve
@@ -575,16 +574,17 @@ class ZMPStore(Store):
         return list(await asyncio.gather(*coros))
 
     async def exists(self, key: str) -> bool:
-        if self._is_annotation(key):
+        zkey = ZPath.from_zarr(key)
+        if self._is_annotation(zkey):
             return False
-        mount = self._find_mount(key)
+        mount = self._find_mount(zkey)
         if mount is not None:
-            prefix, sub_key = mount
-            child = self._get_mount_store(prefix)
+            mount_path, sub_key = mount
+            child = self._get_mount_store(mount_path)
             return await child.exists(sub_key)
-        rewritten = self._find_dir_link(key)
+        rewritten = self._find_dir_link(zkey)
         if rewritten is not None:
-            return await self.exists(rewritten)
+            return await self.exists(rewritten.to_zarr())
         return self._manifest.has(key)
 
     async def set(self, key: str, value: Buffer) -> None:
@@ -593,102 +593,111 @@ class ZMPStore(Store):
     async def delete(self, key: str) -> None:
         raise NotImplementedError("ZMPStore is read-only")
 
-    def _is_under_dir_link(self, path: str) -> bool:
-        return self._find_dir_link(path) is not None
-
     async def list(self) -> AsyncIterator[str]:
         for p in self._manifest.list_paths():
-            if self._is_annotation(p) or self._is_under_mount(p) or self._is_under_dir_link(p):
+            zp = ZPath.from_zarr(p)
+            if self._is_annotation(zp):
+                continue
+            if self._find_mount(zp) is not None:
+                continue
+            if self._find_dir_link(zp) is not None:
                 continue
             yield p
         # Entries from mounts
-        for prefix in self._mount_prefixes:
-            child = self._get_mount_store(prefix)
+        for mount in self._mount_prefixes:
+            child = self._get_mount_store(mount)
             async for p in child.list():
-                yield prefix + p
+                yield (mount / p).to_zarr()
         # Entries through directory links
         for link_prefix, target in self._link_prefixes.items():
-            for p in self._manifest.list_prefix(target):
-                if self._is_annotation(p):
+            for p in self._manifest.list_prefix(target.to_zarr()):
+                zp = ZPath.from_zarr(p)
+                if self._is_annotation(zp):
                     continue
-                yield link_prefix + p[len(target):]
+                rel = zp.relative_to(target)
+                yield (link_prefix / rel).to_zarr()
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+        zprefix = ZPath.from_zarr(prefix)
+
         # Check mounts
-        mount = self._find_mount(prefix)
+        mount = self._find_mount(zprefix)
         if mount is not None:
-            mount_prefix, sub_prefix = mount
-            child = self._get_mount_store(mount_prefix)
+            mount_path, sub_prefix = mount
+            child = self._get_mount_store(mount_path)
             async for p in child.list_prefix(sub_prefix):
-                yield mount_prefix + p
+                yield (mount_path / p).to_zarr()
             return
+
         # Check directory links
-        rewritten = self._find_dir_link(prefix)
+        rewritten = self._find_dir_link(zprefix)
         if rewritten is not None:
-            async for p in self.list_prefix(rewritten):
-                # Re-map back to the link prefix
+            async for p in self.list_prefix(rewritten.to_zarr()):
+                zp = ZPath.from_zarr(p)
+                # Re-map back through link
                 for lp, target in self._link_prefixes.items():
-                    if p.startswith(target):
-                        yield lp + p[len(target):]
+                    if zp.is_equal_or_child_of(target):
+                        rel = zp.relative_to(target)
+                        yield (lp / rel).to_zarr()
                         break
             return
+
         # Local entries
         for p in self._manifest.list_prefix(prefix):
-            if self._is_annotation(p) or self._is_under_mount(p):
+            zp = ZPath.from_zarr(p)
+            if self._is_annotation(zp) or self._find_mount(zp) is not None:
                 continue
             yield p
+
         # Mounts under this prefix
-        for mount_prefix in self._mount_prefixes:
-            if mount_prefix.startswith(prefix):
-                child = self._get_mount_store(mount_prefix)
+        for mount in self._mount_prefixes:
+            if mount.is_equal_or_child_of(zprefix):
+                child = self._get_mount_store(mount)
                 async for p in child.list():
-                    yield mount_prefix + p
+                    yield (mount / p).to_zarr()
+
         # Directory links under this prefix
         for link_prefix, target in self._link_prefixes.items():
-            if link_prefix.startswith(prefix):
-                for p in self._manifest.list_prefix(target):
-                    if self._is_annotation(p):
+            if link_prefix.is_equal_or_child_of(zprefix):
+                for p in self._manifest.list_prefix(target.to_zarr()):
+                    zp = ZPath.from_zarr(p)
+                    if self._is_annotation(zp):
                         continue
-                    yield link_prefix + p[len(target):]
+                    rel = zp.relative_to(target)
+                    yield (link_prefix / rel).to_zarr()
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
-        if prefix and not prefix.endswith("/"):
-            prefix = prefix + "/"
-        # If inside a mount, delegate
-        mount = self._find_mount(prefix)
+        zprefix = ZPath.from_zarr(prefix)
+
+        # If inside or at a mount, delegate
+        mount = self._find_mount(zprefix, include_self=True)
         if mount is not None:
-            mount_prefix, sub_prefix = mount
-            child = self._get_mount_store(mount_prefix)
+            mount_path, sub_prefix = mount
+            child = self._get_mount_store(mount_path)
             async for p in child.list_dir(sub_prefix):
                 yield p
             return
+
         # If inside a directory link, rewrite and list
-        rewritten = self._find_dir_link(prefix)
+        rewritten = self._find_dir_link(zprefix)
         if rewritten is not None:
-            async for p in self.list_dir(rewritten):
+            async for p in self.list_dir(rewritten.to_zarr()):
                 yield p
             return
+
         # Local entries
         seen: set[str] = set()
         for p in self._manifest.list_dir(prefix):
             if p != "":
                 seen.add(p)
                 yield p
-        # Mount points as directory entries
-        for mp in self._mount_prefixes:
-            if mp.startswith(prefix) and mp != prefix:
-                rest = mp[len(prefix):]
-                slash_idx = rest.find("/")
-                if slash_idx == len(rest) - 1:
-                    if rest not in seen:
-                        seen.add(rest)
-                        yield rest
-        # Directory links as directory entries
-        for lp in self._link_prefixes:
-            if lp.startswith(prefix) and lp != prefix:
-                rest = lp[len(prefix):]
-                slash_idx = rest.find("/")
-                if slash_idx == len(rest) - 1:
-                    if rest not in seen:
-                        seen.add(rest)
-                        yield rest
+
+        # Mount points and directory links as directory entries
+        for vdir in (*self._mount_prefixes, *self._link_prefixes):
+            child_name = vdir.child_name_under(zprefix)
+            if child_name is not None:
+                # zarr list_dir convention: directories have trailing /
+                dir_entry = child_name + "/"
+                if dir_entry not in seen:
+                    seen.add(dir_entry)
+                    yield dir_entry

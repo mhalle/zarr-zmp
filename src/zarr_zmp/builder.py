@@ -9,15 +9,21 @@ from zarr.abc.store import Store
 from zarr.core.buffer import default_buffer_prototype
 
 from zmanifest.builder import Builder, canonical_json, git_blob_hash
+from zmanifest.path import ZPath
+
+_ZARR_METADATA_NAMES = frozenset(
+    ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
+)
 
 
 def _parse_array_path_and_chunk_key(
     path: str,
 ) -> tuple[str | None, str | None]:
     """Extract array_path and chunk_key from a zarr v3 path with a ``c/`` separator."""
-    parts = path.split("/")
+    zp = ZPath.from_zarr(path)
+    parts = zp.parts
     try:
-        c_idx = parts.index("c")
+        c_idx = list(parts).index("c")
         array_path = "/".join(parts[:c_idx]) or None
         chunk_key = "/".join(parts[c_idx + 1 :]) or None
         return array_path, chunk_key
@@ -36,10 +42,9 @@ async def _read_store(store: Store) -> dict[str, bytes]:
     return entries
 
 
-def _is_zarr_metadata(path: str) -> bool:
+def _is_zarr_metadata(path: ZPath) -> bool:
     """Check if a path is a zarr metadata file."""
-    basename = path.rsplit("/", 1)[-1] if "/" in path else path
-    return basename in ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
+    return path.name in _ZARR_METADATA_NAMES
 
 
 def build_zmp(
@@ -95,13 +100,13 @@ def _build_zmp_from_entries(
         metadata=metadata,
     )
 
-    for path in sorted(entries):
-        raw = entries[path]
-        if _is_zarr_metadata(path):
+    for key in sorted(entries):
+        raw = entries[key]
+        zpath = ZPath.from_zarr(key)
+        if _is_zarr_metadata(zpath):
             text = canonical_json(raw.decode("utf-8"))
-            builder.add(path, text=text)
+            builder.add(key, text=text)
         else:
-            # Zarr chunks are pre-compressed -> data column (no parquet compression)
-            builder.add(path, data=raw)
+            builder.add(key, data=raw)
 
     return builder.write(output)
