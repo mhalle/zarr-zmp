@@ -72,7 +72,7 @@ class TestEmbeddedWrite:
         assert data is not None
 
     def test_row_group_sizing_embedded(self, tmp_path: Path) -> None:
-        """Embedded mode: data rows first, non-data second-to-last, index last."""
+        """Embedded mode: data rows in adaptive groups, non-data, then archive row."""
         zmp_path = tmp_path / "out.zmp"
         with ZMPWritableStore.create(zmp_path) as store:
             root = zarr.open_group(store=store, mode="w")
@@ -82,12 +82,9 @@ class TestEmbeddedWrite:
 
         pf = pq.ParquetFile(str(zmp_path))
         num_rgs = pf.metadata.num_row_groups
-        # Data rows: one per group
-        for i in range(num_rgs - 2):
-            assert pf.metadata.row_group(i).num_rows == 1
-        # Second-to-last: non-data rows (metadata)
-        assert pf.metadata.row_group(num_rgs - 2).num_rows >= 1
-        # Last: index row alone
+        # Should have at least: 1 data RG + 1 non-data RG + 1 archive RG
+        assert num_rgs >= 3
+        # Last row group: archive row (1 row)
         assert pf.metadata.row_group(num_rgs - 1).num_rows == 1
 
 class TestExternalWrite:
