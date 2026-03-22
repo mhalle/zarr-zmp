@@ -82,10 +82,10 @@ class TestEmbeddedWrite:
 
         pf = pq.ParquetFile(str(zmp_path))
         num_rgs = pf.metadata.num_row_groups
-        # Should have at least: 1 archive RG + 1 non-data RG + 1 data RG
+        # Should have at least: 1 data RG + 1 non-data RG + 1 archive RG
         assert num_rgs >= 3
-        # First row group: archive row (1 row)
-        assert pf.metadata.row_group(0).num_rows == 1
+        # Last row group: archive row (1 row)
+        assert pf.metadata.row_group(num_rgs - 1).num_rows == 1
 
 class TestExternalWrite:
     def test_chunks_written_to_dir(self, tmp_path: Path) -> None:

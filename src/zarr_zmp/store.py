@@ -386,7 +386,9 @@ class ZMPStore(Store):
                 continue
             if Addressing.FOLDER not in entry.addressing:
                 continue
-            zpath = ZPath.from_zarr(path)
+            if path == "":
+                continue
+            zpath = ZPath(path)
             if Addressing.MOUNT in entry.addressing:
                 mount_prefixes.append(zpath)
             elif Addressing.LINK in entry.addressing and entry.resolve:
@@ -394,7 +396,7 @@ class ZMPStore(Store):
                 path_params = resolve_dict.get("_path", {})
                 target = path_params.get("target")
                 if target is not None:
-                    link_prefixes[zpath] = ZPath.from_zarr(target)
+                    link_prefixes[zpath] = ZPath(target)
         # Sort longest-first for proper prefix matching
         self._mount_prefixes = sorted(mount_prefixes, key=lambda p: p.depth, reverse=True)
         self._link_prefixes = dict(
@@ -595,14 +597,16 @@ class ZMPStore(Store):
 
     async def list(self) -> AsyncIterator[str]:
         for p in self._manifest.list_paths():
-            zp = ZPath.from_zarr(p)
+            if p == "":
+                continue
+            zp = ZPath(p)
             if self._is_annotation(zp):
                 continue
             if self._find_mount(zp) is not None:
                 continue
             if self._find_dir_link(zp) is not None:
                 continue
-            yield p
+            yield zp.to_zarr()
         # Entries from mounts
         for mount in self._mount_prefixes:
             child = self._get_mount_store(mount)
@@ -610,8 +614,10 @@ class ZMPStore(Store):
                 yield (mount / p).to_zarr()
         # Entries through directory links
         for link_prefix, target in self._link_prefixes.items():
-            for p in self._manifest.list_prefix(target.to_zarr()):
-                zp = ZPath.from_zarr(p)
+            for p in self._manifest.list_prefix(str(target)):
+                if p == "":
+                    continue
+                zp = ZPath(p)
                 if self._is_annotation(zp):
                     continue
                 rel = zp.relative_to(target)
@@ -643,11 +649,13 @@ class ZMPStore(Store):
             return
 
         # Local entries
-        for p in self._manifest.list_prefix(prefix):
-            zp = ZPath.from_zarr(p)
+        for p in self._manifest.list_prefix(str(zprefix)):
+            if p == "":
+                continue
+            zp = ZPath(p)
             if self._is_annotation(zp) or self._find_mount(zp) is not None:
                 continue
-            yield p
+            yield zp.to_zarr()
 
         # Mounts under this prefix
         for mount in self._mount_prefixes:
@@ -659,8 +667,10 @@ class ZMPStore(Store):
         # Directory links under this prefix
         for link_prefix, target in self._link_prefixes.items():
             if link_prefix.is_equal_or_child_of(zprefix):
-                for p in self._manifest.list_prefix(target.to_zarr()):
-                    zp = ZPath.from_zarr(p)
+                for p in self._manifest.list_prefix(str(target)):
+                    if p == "":
+                        continue
+                    zp = ZPath(p)
                     if self._is_annotation(zp):
                         continue
                     rel = zp.relative_to(target)
@@ -687,7 +697,7 @@ class ZMPStore(Store):
 
         # Local entries
         seen: set[str] = set()
-        for p in self._manifest.list_dir(prefix):
+        for p in self._manifest.list_dir(str(zprefix)):
             if p != "":
                 seen.add(p)
                 yield p
