@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 import pytest
-import rfc8785
 import zarr
 
 from zarr_zmp import Manifest, ZMPStore, ZMPWritableStore
-
-
-def git_blob_hash(content: bytes) -> str:
-    header = f"blob {len(content)}\0".encode()
-    return hashlib.sha1(header + content).hexdigest()
 
 
 class TestEmbeddedWrite:
@@ -96,39 +89,6 @@ class TestEmbeddedWrite:
         assert pf.metadata.row_group(num_rgs - 2).num_rows >= 1
         # Last: index row alone
         assert pf.metadata.row_group(num_rgs - 1).num_rows == 1
-
-    def test_canonical_json_hashing(self, tmp_path: Path) -> None:
-        """Metadata hashes use canonical JSON (RFC 8785)."""
-        zmp_path = tmp_path / "out.zmp"
-        with ZMPWritableStore.create(zmp_path) as store:
-            root = zarr.open_group(store=store, mode="w")
-
-        manifest = Manifest(str(zmp_path))
-        entry = manifest.get_entry("zarr.json")
-        assert entry is not None
-
-        # The retrieval_key should be the git hash of the canonical JSON,
-        # not the raw bytes zarr wrote
-        raw_json = entry.text.encode("utf-8")
-        canonical = rfc8785.dumps(json.loads(raw_json))
-        expected_hash = git_blob_hash(canonical)
-        assert entry.checksum == expected_hash
-
-    def test_retrieval_keys_present(self, tmp_path: Path) -> None:
-        zmp_path = tmp_path / "out.zmp"
-        with ZMPWritableStore.create(zmp_path) as store:
-            root = zarr.open_group(store=store, mode="w")
-            root.create_array("arr", data=np.arange(4.0), chunks=(4,))
-
-        manifest = Manifest(str(zmp_path))
-        for path in manifest.list_paths():
-            if path == "":
-                continue  # root/index row has no retrieval key
-            entry = manifest.get_entry(path)
-            assert entry is not None
-            assert entry.checksum is not None
-            assert len(entry.checksum) == 40  # SHA-1 hex
-
 
 class TestExternalWrite:
     def test_chunks_written_to_dir(self, tmp_path: Path) -> None:

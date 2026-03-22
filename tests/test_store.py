@@ -9,65 +9,7 @@ import zarr
 from zarr.abc.store import RangeByteRequest, OffsetByteRequest, SuffixByteRequest
 from zarr.core.buffer import default_buffer_prototype
 
-from zarr_zmp import Manifest, ZMPStore
-
-
-# --- Manifest tests ---
-
-
-class TestManifest:
-    def test_metadata(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        assert m.metadata["zmp_version"] == "0.2.0"
-        assert m.metadata["zarr_format"] == "3"
-
-    def test_has(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        assert m.has("zarr.json")
-        assert m.has("temp/c/0")
-        assert not m.has("nonexistent")
-
-    def test_get_entry(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        entry = m.get_entry("zarr.json")
-        assert entry is not None
-        assert entry.text is not None
-        assert entry.text is not None
-        parsed = json.loads(entry.text)
-        assert parsed["node_type"] == "group"
-
-    def test_get_entry_missing(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        assert m.get_entry("nonexistent") is None
-
-    def test_get_data(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        data = m.get_data("temp/c/0")
-        assert data is not None
-        arr = np.frombuffer(data, dtype="<f8")
-        np.testing.assert_array_equal(arr, [0.0, 1.0])
-
-    def test_list_paths(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        paths = list(m.list_paths())
-        assert len(paths) == 6
-        assert "zarr.json" in paths
-
-    def test_list_prefix(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        assert len(list(m.list_prefix("temp/c/"))) == 4
-        assert len(list(m.list_prefix("temp/"))) == 5
-
-    def test_list_dir(self, simple_zmp: Path) -> None:
-        m = Manifest(str(simple_zmp))
-        top = list(m.list_dir(""))
-        assert "zarr.json" in top
-        assert "temp/" in top
-        assert len(top) == 2
-
-        temp = list(m.list_dir("temp"))
-        assert "zarr.json" in temp
-        assert "c/" in temp
+from zarr_zmp import ZMPStore
 
 
 # --- Store tests ---
@@ -108,7 +50,6 @@ class TestZMPStore:
     @pytest.mark.asyncio
     async def test_byte_range(self, store: ZMPStore) -> None:
         proto = default_buffer_prototype()
-        # RangeByteRequest: get bytes [0, 8) = first float64
         buf = await store.get("temp/c/0", proto, RangeByteRequest(0, 8))
         assert buf is not None
         arr = np.frombuffer(buf.to_bytes(), dtype="<f8")

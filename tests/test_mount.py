@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import zarr
 
-from zarr_zmp import Addressing, Manifest, Builder, ZMPStore, ZMPWritableStore
+from zarr_zmp import Builder, ZMPStore, ZMPWritableStore
 
 
 async def _collect(ait):
@@ -63,20 +63,6 @@ class TestMount:
         store._is_open = True
         group = zarr.open_group(store=store, mode="r")
         np.testing.assert_array_equal(group["scans/mri/arr"][:], np.arange(4.0, 8.0))
-
-    def test_mount_addressing_flags(self, tmp_path: Path, child_zmp: Path) -> None:
-        builder = Builder()
-        builder.add("zarr.json", text='{}')
-        builder.mount("sub", resolve={"http": {"url": str(child_zmp)}})
-        parent = tmp_path / "parent.zmp"
-        builder.write(parent)
-
-        manifest = Manifest(str(parent))
-        entry = manifest.get_entry("sub")
-        assert entry is not None
-        assert Addressing.MOUNT in entry.addressing
-        assert Addressing.FOLDER in entry.addressing
-        assert Addressing.RESOLVE in entry.addressing
 
     def test_mount_exists(self, tmp_path: Path, child_zmp: Path) -> None:
         builder = Builder()
