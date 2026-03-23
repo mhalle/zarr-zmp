@@ -105,11 +105,21 @@ class ZMPWritableStore(Store):
         super().__init__(read_only=False)
         self._output = Path(output)
         self._chunk_dir = Path(chunk_dir) if chunk_dir is not None else None
-        self._max_rows_per_group = max_rows_per_group
         self._zarr_format = zarr_format
         self._metadata = metadata or {}
         self._base_resolve = base_resolve
-        self._entries: dict[str, bytes] = {}  # keyed by zarr bare path
+        # Metadata entries stay in memory (small, zarr reads them back)
+        self._entries: dict[str, bytes] = {}
+        # All written keys (for listing — chunks aren't in _entries)
+        self._written_keys: set[str] = set()
+        # Streaming builder for data rows (chunks go to disk immediately)
+        self._builder = Builder(
+            output=output,
+            zarr_format=zarr_format,
+            max_rows_per_group=max_rows_per_group,
+            metadata=metadata,
+            base_resolve=base_resolve,
+        )
         self._is_open = True
 
     @classmethod
@@ -174,26 +184,51 @@ class ZMPWritableStore(Store):
         ]
 
     async def exists(self, key: str) -> bool:
-        return key in self._entries
+        return key in self._written_keys
 
     async def set(self, key: str, value: Buffer) -> None:
-        self._entries[key] = value.to_bytes()
+        raw = value.to_bytes()
+        zpath = ZPath.from_zarr(key)
+        archive_path = str(zpath)
+        self._written_keys.add(key)
+
+        if _is_zarr_metadata(zpath):
+            # Metadata: buffer in memory (zarr reads it back) + add to builder
+            self._entries[key] = raw
+            text = canonical_json(raw.decode("utf-8"))
+            self._builder.add(archive_path, text=text)
+        elif self._chunk_dir is not None:
+            # External mode: write blob to chunk_dir, add resolve ref
+            rk = git_blob_hash(raw)
+            blob_path = self._chunk_dir / rk
+            if not blob_path.exists():
+                self._chunk_dir.mkdir(parents=True, exist_ok=True)
+                blob_path.write_bytes(raw)
+            self._builder.add(
+                archive_path,
+                resolve={"git": {"oid": rk}},
+                checksum=rk,
+                size=len(raw),
+            )
+        else:
+            # Embedded mode: stream data row to builder immediately
+            self._builder.add(archive_path, data=raw)
 
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
         if key not in self._entries:
-            self._entries[key] = value.to_bytes()
+            await self.set(key, value)
 
     async def delete(self, key: str) -> None:
         self._entries.pop(key, None)
+        self._written_keys.discard(key)
 
     async def list(self) -> AsyncIterator[str]:
-        for p in sorted(self._entries):
+        for p in sorted(self._written_keys):
             yield p
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
-        # zarr passes bare prefix strings
         zprefix = ZPath.from_zarr(prefix)
-        for key in sorted(self._entries):
+        for key in sorted(self._written_keys):
             zkey = ZPath.from_zarr(key)
             if zkey.is_equal_or_child_of(zprefix):
                 yield key
@@ -201,7 +236,7 @@ class ZMPWritableStore(Store):
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
         zprefix = ZPath.from_zarr(prefix)
         seen: set[str] = set()
-        for key in self._entries:
+        for key in self._written_keys:
             zkey = ZPath.from_zarr(key)
             child = zkey.child_name_under(zprefix)
             if child is None:
@@ -214,47 +249,15 @@ class ZMPWritableStore(Store):
                 yield entry
 
     def commit(self) -> Path:
-        """Flush buffered writes to the ZMP parquet file.
+        """Flush and close the streaming builder.
 
-        For external mode, also writes chunk blobs to ``chunk_dir``.
+        All data rows were already streamed to disk during ``set()``.
+        This writes the remaining non-data rows and archive row.
 
         Returns:
             Path to the written ``.zmp`` file.
         """
-        external = self._chunk_dir is not None
-        if external:
-            self._chunk_dir.mkdir(parents=True, exist_ok=True)
-
-        builder = Builder(
-            zarr_format=self._zarr_format,
-            max_rows_per_group=self._max_rows_per_group,
-            metadata=self._metadata,
-            base_resolve=self._base_resolve,
-        )
-
-        for key in sorted(self._entries):
-            raw = self._entries[key]
-            zpath = ZPath.from_zarr(key)
-            is_meta = _is_zarr_metadata(zpath)
-
-            if is_meta:
-                text = canonical_json(raw.decode("utf-8"))
-                builder.add(key, text=text)
-            elif external:
-                rk = git_blob_hash(raw)
-                blob_path = self._chunk_dir / rk
-                if not blob_path.exists():
-                    blob_path.write_bytes(raw)
-                builder.add(
-                    key,
-                    resolve={"git": {"oid": rk}},
-                    checksum=rk,
-                    size=len(raw),
-                )
-            else:
-                builder.add(key, data=raw)
-
-        return builder.write(self._output)
+        return self._builder.close()
 
 
 # ---------------------------------------------------------------------------
