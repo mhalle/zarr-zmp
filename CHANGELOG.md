@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.12.0 (2026-03-22)
+
+### Breaking changes
+
+- Requires `zmanifest >= 0.12.0` (absolute paths, adaptive row groups).
+
+### Changes
+
+- **ZPath throughout**: All internal path logic uses `ZPath` from
+  zmanifest instead of raw string manipulation with `/`. The zarr Store
+  boundary converts with `ZPath.from_zarr()` (input) and `.to_zarr()`
+  (output).
+- **Manifest paths are absolute**: `ZMPStore` reads `/zarr.json` from the
+  manifest and yields `zarr.json` to zarr. Old manifests (bare paths)
+  still work — zmanifest normalizes on load.
+- **Conftest uses Builder**: Test fixtures use `zmanifest.Builder` instead
+  of raw pyarrow table construction.
+- **zmanifest test separation**: Manifest and Builder tests moved to
+  zmanifest. zarr-zmp retains only zarr Store interface tests (40 tests).
+
 ## v0.1.0 (2026-03-19)
 
 Initial release of zarr-zmp — Zarr v3 store adapter for zmanifest files.
