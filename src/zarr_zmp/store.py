@@ -34,6 +34,10 @@ _ZARR_METADATA_NAMES = frozenset(
     ("zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata")
 )
 
+import functools
+import math
+import numpy as np
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,6 +59,29 @@ def _apply_byte_range(data: bytes, byte_range: ByteRequest | None) -> bytes:
 def _is_zarr_metadata(path: ZPath) -> bool:
     """Check if a path is a zarr metadata file."""
     return path.name in _ZARR_METADATA_NAMES
+
+
+def _chunk_byte_size_from_metadata(metadata_text: str) -> int | None:
+    """Compute full chunk byte size from zarr v3 array metadata JSON.
+
+    Returns the product of chunk_shape * dtype_size, or None if not
+    an array or not parseable.
+    """
+    try:
+        meta = json.loads(metadata_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if meta.get("node_type") != "array":
+        return None
+    chunk_shape = meta.get("chunk_grid", {}).get("configuration", {}).get("chunk_shape")
+    dtype_str = meta.get("data_type")
+    if chunk_shape is None or dtype_str is None:
+        return None
+    try:
+        itemsize = np.dtype(dtype_str).itemsize
+    except TypeError:
+        return None
+    return math.prod(chunk_shape) * itemsize
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +403,8 @@ class ZMPStore(Store):
         self._base_resolve = chain or None
         self._mounts: dict[ZPath, Store] = {}
         self._mount_prefixes: list[ZPath] = []
+        # Cache: array path → full chunk byte size (for edge chunk padding)
+        self._chunk_sizes: dict[str, int] = {}
         self._link_prefixes: dict[ZPath, ZPath] = {}
         self._init_mounts()
 
@@ -521,6 +550,36 @@ class ZMPStore(Store):
             return Addressing.FOLDER in entry.addressing
         return False
 
+    def _get_chunk_byte_size(self, key: ZPath) -> int | None:
+        """Get the full chunk byte size for the array containing this key.
+
+        Caches the result per array path. Returns None if not a chunk
+        or metadata can't be parsed.
+        """
+        # Chunk keys look like /array/c/0/1/2 — find the array path
+        parts = key.parts
+        try:
+            c_idx = list(parts).index("c")
+        except ValueError:
+            return None
+        array_path = "/".join(parts[:c_idx])
+
+        if array_path in self._chunk_sizes:
+            return self._chunk_sizes[array_path]
+
+        # Read the array's zarr.json (or .zarray for v2)
+        for meta_name in ("zarr.json", ".zarray"):
+            meta_key = f"{array_path}/{meta_name}" if array_path else meta_name
+            entry = self._manifest.get_entry(meta_key)
+            if entry is not None and entry.text:
+                size = _chunk_byte_size_from_metadata(entry.text)
+                if size is not None:
+                    self._chunk_sizes[array_path] = size
+                    return size
+
+        self._chunk_sizes[array_path] = None
+        return None
+
     # -- Zarr Store interface --------------------------------------------------
     # All methods receive bare zarr strings, convert to ZPath internally,
     # and yield bare strings back to zarr.
@@ -562,6 +621,19 @@ class ZMPStore(Store):
         )
         if raw is None:
             return None
+
+        # Pad edge chunks to full chunk size when content was decompressed
+        # by our resolve pipeline (content_encoding set). Zarr v3's bytes
+        # codec expects full-sized raw chunks; edge chunks at array
+        # boundaries may have fewer bytes after decompression.
+        # Only applies to content_encoding data — zarr-compressed chunks
+        # are already the right size for zarr's codec pipeline.
+        if byte_range is None and entry.content_encoding:
+            expected = self._get_chunk_byte_size(zkey)
+            if expected is not None and len(raw) < expected:
+                padded = bytearray(expected)
+                padded[:len(raw)] = raw
+                raw = bytes(padded)
 
         raw = _apply_byte_range(raw, byte_range)
         return prototype.buffer.from_bytes(raw)
