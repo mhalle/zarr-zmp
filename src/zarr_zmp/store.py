@@ -487,7 +487,15 @@ class ZMPStore(Store):
         mount_opener: ZarrMountOpener | None = None,
     ) -> ZMPStore:
         manifest = Manifest(path)
-        location_base = [{"http": {"url": str(Path(path).resolve().parent) + "/"}}]
+        # Only add the manifest's parent directory as a base if the
+        # manifest doesn't already have its own base_resolve.
+        # If it does (e.g. pointing to a TIFF file), the location
+        # base is noise and can cause join confusion.
+        file_base = get_file_base_resolve(manifest)
+        if file_base is None:
+            location_base = [{"http": {"url": str(Path(path).resolve().parent) + "/"}}]
+        else:
+            location_base = None
         return cls(
             manifest=manifest,
             resolvers=resolvers,
