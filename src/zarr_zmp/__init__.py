@@ -21,6 +21,7 @@ from zmanifest import (
 from .builder import async_build_zmp, build_zmp
 from .store import ZMPStore, ZMPWritableStore, default_zmp_mount_opener
 from .store import ZarrMountOpener as MountOpener
+from .nrrd_store import NRRDStore
 
 __all__ = [
     "Addressing",
@@ -33,6 +34,7 @@ __all__ = [
     "ManifestEntry",
     "ManifestMetadata",
     "MountOpener",
+    "NRRDStore",
     "Resolver",
     "ZMPStore",
     "ZMPWritableStore",
