@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.16.0 (2026-03-28)
+
+### Features
+
+- **NRRDStore**: Read-only zarr v3 store wrapping NRRD files. Raw
+  encoding gives chunked random access; compressed uses zarr codecs.
+  NRRD metadata preserved in `attributes.nrrd`.
+- **Streaming writer**: `ZMPWritableStore` streams chunk data to disk
+  during `set()` instead of buffering in memory.
+- **Edge chunk padding**: Virtual references with `content_encoding`
+  are padded to full chunk size for zarr compatibility.
+- **Cleaned up base_resolve**: `from_file()` skips location base when
+  manifest has its own `base_resolve`.
+
+### Dependencies
+
+- Requires `zmanifest >= 0.16.0`.
+
 ## v0.12.0 (2026-03-22)
 
 ### Breaking changes

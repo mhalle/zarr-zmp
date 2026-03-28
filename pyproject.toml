@@ -1,6 +1,6 @@
 [project]
 name = "zarr-zmp"
-version = "0.12.0"
+version = "0.16.0"
 description = "Zarr v3 store adapter for ZMP (Manifest Parquet) files"
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "zmanifest>=0.12.0",
+    "zmanifest>=0.16.0",
     "zarr>=3.0",
 ]
 
