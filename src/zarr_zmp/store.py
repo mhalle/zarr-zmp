@@ -121,7 +121,7 @@ class ZMPWritableStore(Store):
 
     def __init__(
         self,
-        output: str | Path,
+        output: str | Path | Any,
         *,
         chunk_dir: str | Path | None = None,
         max_rows_per_group: int | None = None,
@@ -130,7 +130,7 @@ class ZMPWritableStore(Store):
         base_resolve: dict | None = None,
     ) -> None:
         super().__init__(read_only=False)
-        self._output = Path(output)
+        self._output = Path(output) if isinstance(output, (str, Path)) else output
         self._chunk_dir = Path(chunk_dir) if chunk_dir is not None else None
         self._zarr_format = zarr_format
         self._metadata = metadata or {}
@@ -152,7 +152,7 @@ class ZMPWritableStore(Store):
     @classmethod
     def create(
         cls,
-        output: str | Path,
+        output: str | Path | Any,
         *,
         chunk_dir: str | Path | None = None,
         max_rows_per_group: int | None = None,
@@ -178,7 +178,7 @@ class ZMPWritableStore(Store):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ZMPWritableStore):
             return NotImplemented
-        return self._output == other._output
+        return self._output is other._output
 
     async def open(self, *args: Any, **kwargs: Any) -> Self:
         self._is_open = True
