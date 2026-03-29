@@ -558,6 +558,49 @@ class ZMPStore(Store):
             return Addressing.FOLDER in entry.addressing
         return False
 
+    def get_data_location(self, key: str) -> tuple[str, int, int] | None:
+        """Get the file path, byte offset, and length of inline data.
+
+        For entries in the local manifest, returns ``(file_path, offset, length)``
+        where the blob can be read directly via a range request.
+        For entries under mounts, delegates to the child store.
+        For entries reachable via directory links, follows the link.
+
+        Returns None if the entry has no inline data or the location
+        can't be determined.
+
+        Args:
+            key: Zarr-style bare path (e.g. ``"arr/c/0"``).
+        """
+        zkey = ZPath.from_zarr(key)
+
+        if self._is_annotation(zkey):
+            return None
+
+        # Check mounts — delegate to child store if already opened
+        mount = self._find_mount(zkey)
+        if mount is not None:
+            mount_path, sub_key = mount
+            child = self._mounts.get(mount_path.toString())
+            if child is not None and isinstance(child, ZMPStore):
+                return child.get_data_location(sub_key)
+            return None
+
+        # Check directory links
+        rewritten = self._find_dir_link(zkey)
+        if rewritten is not None:
+            return self.get_data_location(rewritten.to_zarr())
+
+        # Local manifest
+        loc = self._manifest.get_data_location(key)
+        if loc is None:
+            return None
+        file_path = self._manifest.file_path
+        if file_path is None:
+            return None
+        offset, length = loc
+        return (file_path, offset, length)
+
     def _get_chunk_byte_size(self, key: ZPath) -> int | None:
         """Get the full chunk byte size for the array containing this key.
 
