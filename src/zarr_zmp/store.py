@@ -338,26 +338,6 @@ def default_zmp_mount_opener(
 
     resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
 
-    # Inline mount via _path — data stored in a sibling manifest entry.
-    # This lets the child ZMP have its own path, checksum, and metadata,
-    # and be referenced by multiple mounts or inspected independently.
-    path_params = resolve_dict.get("_path")
-    if path_params and "entry" in path_params and manifest is not None:
-        entry_path = path_params["entry"]
-        embedded_bytes = manifest.get_data(entry_path)
-        if embedded_bytes is None:
-            raise ValueError(
-                f"Inline mount {entry.path!r} references {entry_path!r} "
-                f"but no data found at that path"
-            )
-        child_manifest = Manifest(embedded_bytes)
-        return ZMPStore(
-            manifest=child_manifest,
-            resolvers=resolvers,
-            mount_opener=mount_opener,
-            base_resolve=base_resolve,
-        )
-
     http_params = resolve_dict.get("http")
     if http_params and "url" in http_params:
         url = http_params["url"]
