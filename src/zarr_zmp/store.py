@@ -425,7 +425,7 @@ class ZMPStore(Store):
                 mount_prefixes.append(zpath)
             elif Addressing.LINK in entry.addressing and entry.resolve:
                 resolve_dict = json.loads(entry.resolve) if isinstance(entry.resolve, str) else entry.resolve
-                path_params = resolve_dict.get("_path", {})
+                path_params = resolve_dict.get("path") or resolve_dict.get("_path") or {}
                 target = path_params.get("target")
                 if target is not None:
                     link_prefixes[zpath] = ZPath(target)
